@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Mississippi — Prototype A (Ribbons River)</title>
+  <style>
+    html, body { height: 100%; margin: 0; background:#0a0f14; color:#e7f0f7; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+    #wrap { position: relative; height: 100%; }
+    canvas { display:block; width:100%; height:100%; background: radial-gradient(1200px 800px at 50% 10%, #0d1a22 0%, #081118 60%, #060a0f 100%); }
+    #hud { position:absolute; left:12px; top:12px; padding:10px 12px; background:rgba(8,12,16,0.65); border:1px solid rgba(255,255,255,0.08); border-radius:10px; backdrop-filter: blur(3px); user-select:none; }
+    #hud h1 { font-size:14px; margin:0 0 6px 0; letter-spacing:.5px; opacity:.9; }
+    #hud p { margin:4px 0; font-size:12px; opacity:.9; line-height:1.3; }
+    #hud .kbd { display:inline-block; padding:1px 6px; border:1px solid rgba(255,255,255,0.25); border-radius:6px; font-size:11px; margin-right:4px; }
+    #notice { position:absolute; right:12px; top:12px; padding:8px 10px; background:#00161f; border:1px solid rgba(255,255,255,0.08); border-radius:10px; font-size:12px; opacity:.9; }
+  </style>
+</head>
+<body>
+  <div id="wrap">
+    <canvas id="game"></canvas>
+    <div id="hud">
+      <h1>Mississippi — Prototype A</h1>
+      <p>Goal: feel the river. Read the lanes, ride the slicks, fight the eddies.</p>
+      <p>
+        <span class="kbd">W</span>/<span class="kbd">S</span> throttle &nbsp; 
+        <span class="kbd">A</span>/<span class="kbd">D</span> steer &nbsp; 
+        <span class="kbd">Space</span> stop &nbsp;
+        <span class="kbd">H</span> toggle help
+      </p>
+      <p>
+        Debug: <span class="kbd">F</span> flow arrows, <span class="kbd">R</span> ribbons, <span class="kbd">G</span> grid, <span class="kbd">V</span> vortices
+      </p>
+      <p id="stats"></p>
+    </div>
+    <div id="notice">Prototype A: water field + ribbons + one boat. No economy yet.</div>
+  </div>
+
+  <script>
+  (()=>{
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d');
+
+    // DPI handling
+    function resize(){
+      const dpr = Math.min(2, window.devicePixelRatio || 1);
+      canvas.width = Math.floor(canvas.clientWidth * dpr);
+      canvas.height = Math.floor(canvas.clientHeight * dpr);
+      ctx.setTransform(dpr,0,0,dpr,0,0); // draw in CSS pixels
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    // World constants
+    const RIVER_WIDTH = 1200;         // world units (CSS px)
+    const BASE_FLOW = 80;             // px/s downward baseline
+    const TURN_BASE = 1.6;            // rad/s at decent way-through-water
+    const MAX_THRUST = 160;           // px/s^2 (engine force)
+    const HULL_DRAG = 0.9;            // per-second rate pulling boat toward water velocity
+    const LATERAL_CENTERING = 3.0;    // pushes flow back toward center
+    const VORTEX_COUNT = 22;
+    const VORTEX_STRENGTH = 22000;    // circulation scale
+    const VORTEX_RADIUS = 220;        // influence radius
+    const EDGE_MARGIN = 24;           // bank collision padding
+
+    // Camera
+    const camera = { x: RIVER_WIDTH/2, y: -200 };
+
+    // River banks are straight for Prototype A (x: 0..RIVER_WIDTH). We'll keep camera.x fixed at center.
+
+    // Vortices field — a handful of eddies drifting downriver
+    function rand(min,max){ return min + Math.random()*(max-min); }
+
+    const vortices = [];
+    function spawnVortex(aroundY){
+      vortices.push({
+        x: rand(140, RIVER_WIDTH-140),
+        y: aroundY + rand(-1200, 1200),
+        gamma: (Math.random()<0.5?-1:1) * rand(0.6,1.3) * VORTEX_STRENGTH,
+        r: rand(0.7,1.3) * VORTEX_RADIUS,
+      });
+    }
+    for(let i=0;i<VORTEX_COUNT;i++) spawnVortex(camera.y + rand(-2400, 2400));
+
+    function updateVortices(dt){
+      for(const v of vortices){
+        v.y += (BASE_FLOW*0.85) * dt; // drift downriver
+        // tiny side meander
+        v.x += Math.sin((v.y+v.x)*0.0009) * 14 * dt;
+        // wrap when far below
+        if(v.y > camera.y + 3000){
+          v.x = rand(140, RIVER_WIDTH-140);
+          v.y = camera.y - 2800 - rand(0,300);
+          v.gamma = (Math.random()<0.5?-1:1) * rand(0.6,1.3) * VORTEX_STRENGTH;
+          v.r = rand(0.7,1.3) * VORTEX_RADIUS;
+        }
+      }
+    }
+
+    // River speed profile: faster midstream, slower near banks
+    function centerSpeedFactor(x){
+      const cx = RIVER_WIDTH/2;
+      const nx = (x - cx) / (RIVER_WIDTH/2);
+      const parabolic = 1 - Math.min(1, nx*nx);
+      return 0.60 + 0.50*parabolic; // 0.6 at edges -> 1.1 at center
+    }
+
+    // Gentle lateral pull toward center (keeps flow coherent)
+    function centerPull(x){
+      const cx = RIVER_WIDTH/2;
+      return (cx - x) * 0.0025 * LATERAL_CENTERING; // px/s lateral pull
+    }
+
+    // Water velocity field at world (x,y)
+    function waterVelocity(x, y){
+      let vx = 0;
+      let vy = BASE_FLOW * centerSpeedFactor(x) * (1 + 0.10 * Math.sin(y*0.0012));
+
+      // slight sinuous lateral sweep (implies sand waves / point bars)
+      vx += Math.sin(y*0.00075) * 16;
+
+      // center pull
+      vx += centerPull(x);
+
+      // add vortices
+      for(const v of vortices){
+        const dx = x - v.x;
+        const dy = y - v.y;
+        const r2 = dx*dx + dy*dy + 1;
+        const r = Math.sqrt(r2);
+        if(r < v.r*2.5){
+          // Gaussian falloff to localize influence
+          const fall = Math.exp(-(r*r)/(v.r*v.r*0.9));
+          // tangential unit vector (perpendicular to radius): (-dy, dx)/r
+          const mag = (v.gamma / (r2 + 400)) * fall; // circulation strength
+          vx += (-dy) * mag;
+          vy += ( dx) * mag;
+        }
+      }
+
+      return {x: vx, y: vy};
+    }
+
+    // Boat
+    const boat = {
+      x: RIVER_WIDTH/2,
+      y: -400,
+      vx: 0,
+      vy: BASE_FLOW,
+      angle: Math.PI/2, // facing downriver
+      throttle: 0,
+      targetThrottle: 0,
+      length: 110,
+      width: 24,
+    };
+
+    // Input
+    const keys = new Set();
+    window.addEventListener('keydown', (e)=>{ keys.add(e.key.toLowerCase()); if(['w','a','s','d','arrowup','arrowdown','arrowleft','arrowright',' '].includes(e.key.toLowerCase())) e.preventDefault(); });
+    window.addEventListener('keyup', (e)=>{ keys.delete(e.key.toLowerCase()); });
+
+    let showHelp = true;
+    let showVectors = false;
+    let showRibbons = true;
+    let showGrid = false;
+    let showVorts = false;
+
+    window.addEventListener('keydown', (e)=>{
+      const k = e.key.toLowerCase();
+      if(k==='h') showHelp = !showHelp;
+      if(k==='f') showVectors = !showVectors;
+      if(k==='r') showRibbons = !showRibbons;
+      if(k==='g') showGrid = !showGrid;
+      if(k==='v') showVorts = !showVorts;
+      if(k===' ') { boat.targetThrottle = 0; boat.throttle = 0; } // stop
+    });
+
+    // Ribbons: vertical strands advected by the field
+    const RIBBON_COUNT = 42;
+    const RIB_POINTS = 60;
+    const RIB_SPACING_Y = 60; // distance between points along a ribbon
+    const RIBBONS = [];
+
+    function initRibbons(){
+      RIBBONS.length = 0;
+      for(let i=0;i<RIBBON_COUNT;i++){
+        const tx = (i+0.5) * (RIVER_WIDTH / RIBBON_COUNT);
+        const pts = [];
+        for(let p=0;p<RIB_POINTS;p++){
+          const py = camera.y - 2000 + p*RIB_SPACING_Y + Math.random()*8;
+          pts.push({ x: tx + (Math.random()-0.5)*8, y: py });
+        }
+        RIBBONS.push({ pts });
+      }
+    }
+    initRibbons();
+
+    function updateRibbons(dt){
+      const topY = camera.y - 2200;
+      const botY = camera.y + 2200;
+      for(const rib of RIBBONS){
+        const pts = rib.pts;
+        for(const pt of pts){
+          const v = waterVelocity(pt.x, pt.y);
+          pt.x += v.x * dt;
+          pt.y += v.y * dt;
+          // confine within banks a little so strands don't escape
+          if(pt.x < EDGE_MARGIN) pt.x = EDGE_MARGIN;
+          if(pt.x > RIVER_WIDTH-EDGE_MARGIN) pt.x = RIVER_WIDTH-EDGE_MARGIN;
+        }
+        // recycle points that drifted below
+        for(const pt of pts){
+          if(pt.y > botY){
+            pt.y -= (RIB_POINTS-2)*RIB_SPACING_Y; // move it to the top preserving sequence spacing
+            // slight re-jitter to avoid frozen look
+            pt.x += (Math.random()-0.5)*10;
+          }
+        }
+      }
+    }
+
+    // Boat physics update
+    function updateBoat(dt){
+      // throttle control
+      const forward = keys.has('w') || keys.has('arrowup');
+      const back = keys.has('s') || keys.has('arrowdown');
+      if(forward && !back) boat.targetThrottle = Math.min(1, boat.targetThrottle + 0.8*dt);
+      else if(back && !forward) boat.targetThrottle = Math.max(-0.5, boat.targetThrottle - 0.9*dt); // modest reverse
+      else boat.targetThrottle *= (1 - 0.8*dt); // ease toward zero
+      // smooth throttle response
+      boat.throttle += (boat.targetThrottle - boat.throttle) * Math.min(1, 6*dt);
+
+      // steering (rudder effectiveness scales with speed-through-water)
+      const left = keys.has('a') || keys.has('arrowleft');
+      const right = keys.has('d') || keys.has('arrowright');
+
+      const wv = waterVelocity(boat.x, boat.y);
+      // boat speed through water (relative speed)
+      const rvx = boat.vx - wv.x;
+      const rvy = boat.vy - wv.y;
+      const relSpeed = Math.hypot(rvx, rvy);
+
+      let steer = 0;
+      if(left && !right) steer = -1; else if(right && !left) steer = 1;
+      const turnRate = TURN_BASE * Math.min(1.0, relSpeed/120); // cap turning effectiveness
+      boat.angle += steer * turnRate * dt;
+
+      // engine thrust along heading
+      const thrust = MAX_THRUST * boat.throttle;
+      boat.vx += Math.cos(boat.angle) * thrust * dt;
+      boat.vy += Math.sin(boat.angle) * thrust * dt;
+
+      // hydrodynamic drag pulls velocity toward local water velocity
+      boat.vx += (wv.x - boat.vx) * (1 - Math.exp(-HULL_DRAG*dt));
+      boat.vy += (wv.y - boat.vy) * (1 - Math.exp(-HULL_DRAG*dt));
+
+      // integrate position
+      boat.x += boat.vx * dt;
+      boat.y += boat.vy * dt;
+
+      // banks collision & ground effect near banks
+      if(boat.x < EDGE_MARGIN){ boat.x = EDGE_MARGIN; boat.vx *= -0.2; }
+      if(boat.x > RIVER_WIDTH-EDGE_MARGIN){ boat.x = RIVER_WIDTH-EDGE_MARGIN; boat.vx *= -0.2; }
+    }
+
+    // Camera follows boat downriver, keep x centered (for now)
+    function updateCamera(dt){
+      const targetY = boat.y - canvas.clientHeight*0.38; // keep boat in upper half
+      camera.y += (targetY - camera.y) * Math.min(1, 2.5*dt);
+    }
+
+    // Rendering helpers
+    function toScreen(x,y){
+      return { x: (x - camera.x) + canvas.clientWidth/2, y: (y - camera.y) + canvas.clientHeight/2 };
+    }
+
+    function drawRiverBackground(){
+      const left = toScreen(0, camera.y - 9999).x;
+      const right = toScreen(RIVER_WIDTH, camera.y - 9999).x;
+      // banks
+      ctx.fillStyle = '#0b0f12';
+      ctx.fillRect(0,0, toScreen(RIVER_WIDTH, camera.y).x - toScreen(0, camera.y).x, canvas.clientHeight); // ensure paint; backdrop already dark
+      // water gradient band (soft edges)
+      const gx = toScreen(0,0).x; const gx2 = toScreen(RIVER_WIDTH,0).x;
+      const grd = ctx.createLinearGradient(gx,0,gx2,0);
+      grd.addColorStop(0, 'rgba(20,42,55,0.1)');
+      grd.addColorStop(0.1, 'rgba(25,66,86,0.65)');
+      grd.addColorStop(0.9, 'rgba(25,66,86,0.65)');
+      grd.addColorStop(1, 'rgba(20,42,55,0.1)');
+      ctx.fillStyle = grd;
+      ctx.fillRect(gx,0, gx2-gx, canvas.clientHeight);
+    }
+
+    function drawRibbons(){
+      ctx.save();
+      ctx.lineWidth = 2.0; // thin paper strands
+      ctx.globalAlpha = 0.65;
+      for(const rib of RIBBONS){
+        const pts = rib.pts;
+        ctx.beginPath();
+        for(let i=0;i<pts.length;i++){
+          const s = toScreen(pts[i].x, pts[i].y);
+          if(i===0) ctx.moveTo(s.x,s.y); else ctx.lineTo(s.x,s.y);
+        }
+        // soft blue-white ink
+        ctx.strokeStyle = 'rgba(190, 230, 255, 0.22)';
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    function drawFlowVectors(){
+      ctx.save();
+      const step = 90;
+      for(let sx=0; sx<canvas.clientWidth; sx+=step){
+        for(let sy=0; sy<canvas.clientHeight; sy+=step){
+          const worldX = camera.x - canvas.clientWidth/2 + sx;
+          const worldY = camera.y - canvas.clientHeight/2 + sy;
+          // only sample inside river
+          const rx = worldX; if(rx<0||rx>RIVER_WIDTH) continue;
+          const v = waterVelocity(worldX, worldY);
+          const len = Math.hypot(v.x, v.y);
+          const n = len>0 ? {x:v.x/len, y:v.y/len} : {x:0,y:1};
+          const L = Math.min(28, 10 + len*0.05);
+          ctx.beginPath();
+          ctx.moveTo(sx, sy);
+          ctx.lineTo(sx + n.x*L, sy + n.y*L);
+          // arrow head
+          ctx.moveTo(sx + n.x*L, sy + n.y*L);
+          ctx.lineTo(sx + n.x*L - n.y*6, sy + n.y*L + n.x*6);
+          ctx.moveTo(sx + n.x*L, sy + n.y*L);
+          ctx.lineTo(sx + n.x*L + n.y*6, sy + n.y*L - n.x*6);
+          ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+          ctx.lineWidth = 1;
+          ctx.stroke();
+        }
+      }
+      ctx.restore();
+    }
+
+    function drawVortices(){
+      ctx.save();
+      ctx.lineWidth = 1.5;
+      for(const v of vortices){
+        const s = toScreen(v.x, v.y);
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, v.r, 0, Math.PI*2);
+        ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(s.x-5, s.y);
+        ctx.lineTo(s.x+5, s.y);
+        ctx.moveTo(s.x, s.y-5);
+        ctx.lineTo(s.x, s.y+5);
+        ctx.strokeStyle = 'rgba(255,180,120,0.35)';
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    function drawGrid(){
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+      ctx.lineWidth = 1;
+      const step = 200;
+      const startX = Math.floor((camera.x - canvas.clientWidth/2)/step)*step;
+      const endX = Math.ceil((camera.x + canvas.clientWidth/2)/step)*step;
+      const startY = Math.floor((camera.y - canvas.clientHeight/2)/step)*step;
+      const endY = Math.ceil((camera.y + canvas.clientHeight/2)/step)*step;
+      for(let x=startX; x<=endX; x+=step){
+        const a = toScreen(x, startY);
+        const b = toScreen(x, endY);
+        ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x,b.y); ctx.stroke();
+      }
+      for(let y=startY; y<=endY; y+=step){
+        const a = toScreen(startX, y);
+        const b = toScreen(endX, y);
+        ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x,b.y); ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    function drawBoat(){
+      const s = toScreen(boat.x, boat.y);
+      ctx.save();
+      ctx.translate(s.x, s.y);
+      ctx.rotate(boat.angle + Math.PI/2); // hull drawn pointing up; rotate so angle 0 faces right, +y downriver
+      // hull
+      ctx.beginPath();
+      const L = boat.length, W = boat.width;
+      ctx.moveTo(0, -L*0.5);
+      ctx.quadraticCurveTo(W*0.5, -L*0.35, W*0.5, 0);
+      ctx.lineTo(W*0.5, L*0.35);
+      ctx.quadraticCurveTo(0, L*0.52, -W*0.5, L*0.35);
+      ctx.lineTo(-W*0.5, 0);
+      ctx.quadraticCurveTo(-W*0.5, -L*0.35, 0, -L*0.5);
+      ctx.closePath();
+      ctx.fillStyle = '#c7cbd1';
+      ctx.globalAlpha = 0.95; ctx.fill();
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+      ctx.lineWidth = 2; ctx.stroke();
+      // pilot house
+      ctx.beginPath();
+      ctx.rect(-W*0.25, -L*0.18, W*0.5, L*0.18);
+      ctx.fillStyle = '#e5e7eb';
+      ctx.fill();
+      // paddle wheel suggestion
+      ctx.beginPath();
+      ctx.arc(0, L*0.36, W*0.6, Math.PI*0.12, Math.PI*0.88);
+      ctx.strokeStyle = 'rgba(0,0,0,0.45)';
+      ctx.stroke();
+      ctx.restore();
+
+      // speed readout
+      const wv = waterVelocity(boat.x, boat.y);
+      const gs = Math.hypot(boat.vx, boat.vy);
+      const ws = Math.hypot(wv.x, wv.y);
+      const tw = Math.hypot(boat.vx - wv.x, boat.vy - wv.y);
+      const el = document.getElementById('stats');
+      el.textContent = `Speed over ground: ${gs.toFixed(1)}  |  Speed through water: ${tw.toFixed(1)}  |  River: ${ws.toFixed(1)}`;
+    }
+
+    let last = performance.now();
+    function frame(now){
+      const rawdt = (now - last) / 1000;
+      const dt = Math.min(0.05, rawdt); // clamp for stability
+      last = now;
+
+      // updates
+      updateVortices(dt);
+      updateRibbons(dt);
+      updateBoat(dt);
+      updateCamera(dt);
+
+      // draw
+      ctx.clearRect(0,0, canvas.clientWidth, canvas.clientHeight);
+      drawRiverBackground();
+      if(showGrid) drawGrid();
+      if(showRibbons) drawRibbons();
+      if(showVectors) drawFlowVectors();
+      if(showVorts) drawVortices();
+      drawBoat();
+
+      // help overlay
+      if(showHelp){
+        ctx.save();
+        ctx.globalAlpha = 0.85;
+        ctx.fillStyle = 'rgba(0,0,0,0.45)';
+        ctx.fillRect(canvas.clientWidth-340, canvas.clientHeight-132, 330, 120);
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = '#dbe8f1';
+        ctx.font = '12px system-ui, sans-serif';
+        const lines = [
+          'W/S: throttle  |  A/D: steer',
+          'Space: stop  |  H: hide help',
+          'F: flow arrows, R: ribbons, G: grid, V: vortices',
+          'Tip: watch the strands — pick the slicks between them'
+        ];
+        for(let i=0;i<lines.length;i++) ctx.fillText(lines[i], canvas.clientWidth-326, canvas.clientHeight-112 + i*20);
+        ctx.restore();
+      }
+
+      requestAnimationFrame(frame);
+    }
+
+    requestAnimationFrame(frame);
+  })();
+  </script>
+</body>
+</html>
