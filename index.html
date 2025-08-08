@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Mississippi — Prototype C (Ports • Jobs Board • Fuel/Repairs • AI Docking)</title>
+  <title>Mississippi — Prototype D (Dock Assist • Aesthetic Pass • Time of Day)</title>
   <style>
     html, body { height: 100%; margin: 0; background:#0a0f14; color:#e7f0f7; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
     #wrap { position: relative; height: 100%; }
@@ -19,7 +19,7 @@
     .fill.red { background:linear-gradient(90deg, #fecaca, #ef4444); }
 
     /* Port UI overlay */
-    #portui{ position:absolute; left:50%; top:50%; transform:translate(-50%,-50%); width:520px; max-width:92vw; background:rgba(6,12,18,0.92); border:1px solid rgba(255,255,255,0.12); border-radius:14px; padding:16px 16px 12px; box-shadow:0 20px 60px rgba(0,0,0,0.5); display:none; }
+    #portui{ position:absolute; left:50%; top:50%; transform:translate(-50%,-50%); width:560px; max-width:95vw; background:rgba(6,12,18,0.94); border:1px solid rgba(255,255,255,0.12); border-radius:14px; padding:16px 16px 12px; box-shadow:0 20px 60px rgba(0,0,0,0.5); display:none; }
     #portui h2{ margin:0 0 10px; font-size:16px; letter-spacing:.4px; }
     #portui .row{ display:flex; gap:10px; }
     #portui .col{ flex:1; background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.08); border-radius:12px; padding:10px; }
@@ -29,29 +29,31 @@
 
     /* Status toast */
     #status{ position:absolute; left:50%; transform:translateX(-50%); bottom:10px; background:rgba(0,0,0,0.6); border:1px solid rgba(255,255,255,0.15); color:#e7f0f7; padding:6px 10px; border-radius:10px; font-size:12px; display:none; }
+
+    /* Thematic vignette */
+    #vignette{ position:absolute; inset:0; pointer-events:none; background:radial-gradient(100% 85% at 50% 50%, rgba(0,0,0,0) 55%, rgba(0,0,0,0.3) 100%); mix-blend-mode:multiply; }
   </style>
 </head>
 <body>
   <div id="wrap">
     <canvas id="game"></canvas>
     <div id="hud">
-      <h1>Mississippi — Prototype C</h1>
-      <p>W/S throttle · A/D steer · <span class="kbd">Space</span> stop · <span class="kbd">E</span> dock/undock</p>
+      <h1>Mississippi — Prototype D</h1>
+      <p>W/S throttle · A/D steer · <span class="kbd">Space</span> stop · <span class="kbd">E</span> dock/undock (now auto-moor)</p>
       <p>Debug: <span class="kbd">F</span> flow · <span class="kbd">R</span> ribbons · <span class="kbd">G</span> grid · <span class="kbd">V</span> vortices · <span class="kbd">B</span> bars</p>
       <p id="stats"></p>
-      <p>Hull
-        <span class="bar"><span id="hullbar" class="fill red" style="width:100%"></span></span>
-        &nbsp; Fuel
-        <span class="bar"><span id="fuelbar" class="fill" style="width:100%"></span></span>
-        &nbsp; Pressure
-        <span class="bar" style="width:120px;"><span id="pressbar" class="fill" style="width:10%"></span></span>
+      <p>
+        Hull <span class="bar"><span id="hullbar" class="fill red" style="width:100%"></span></span>
+        &nbsp; Fuel <span class="bar"><span id="fuelbar" class="fill" style="width:100%"></span></span>
+        &nbsp; Pressure <span class="bar" style="width:120px;"><span id="pressbar" class="fill" style="width:10%"></span></span>
         &nbsp; Cash $<span id="cash">0</span>
       </p>
+      <p id="clock"></p>
     </div>
-    <div id="notice">Now with ports, contracts board at docks, fuel & repairs, and an AI steamer that docks on its own.</div>
+    <div id="notice">Dock assist, mooring lock, wakes & smoke, day/night, sepia chart vibe, and clearer docking prompts.</div>
     <div id="job">
       <div id="jobline">No contract.</div>
-      <div id="jobhint" style="opacity:.85; margin-top:6px;">Find a dock (white marker). Slow to dock speed and press <b>E</b> to open port.</div>
+      <div id="jobhint" style="opacity:.9; margin-top:6px;">Line up on the white marker. When the prompt appears, press <b>E</b> to auto-moor.</div>
     </div>
 
     <!-- Port overlay -->
@@ -78,6 +80,7 @@
       </div>
     </div>
     <div id="status"></div>
+    <div id="vignette"></div>
   </div>
 
   <script>
@@ -100,7 +103,7 @@
     const BASE_FLOW   = 86;             // px/s downward baseline
     const TURN_BASE   = 1.6;            // rad/s at decent way-through-water
     const MAX_THRUST  = 170;            // px/s^2 (engine force)
-    const HULL_DRAG   = 0.9;            // per-second pull of boat toward water velocity
+    const HULL_DRAG   = 0.9;            // pull of boat toward local water velocity
     const EDGE_MARGIN = 24;             // bank collision padding
 
     // Field shaping
@@ -117,11 +120,22 @@
     const FUEL_PRICE = 0.8;   // $ per unit
     const REPAIR_PRICE = 150; // $ for full repair (scaled by damage)
 
-    // Job cache per port
-    const portJobs = new Map();
-
     // Camera (follows player)
     const camera = { x: RIVER_WIDTH/2, y: -200 };
+
+    // Date/time sim
+    const clockEl = document.getElementById('clock');
+    const simClock = { year:1857, month:5, day:3, minutes:8*60+12, rate: 6 }; // rate: minutes per real second
+
+    function advanceClock(dt){
+      simClock.minutes += simClock.rate*dt;
+      while(simClock.minutes>=24*60){ simClock.minutes -= 24*60; simClock.day++; }
+    }
+    function formatClock(){
+      const h = Math.floor(simClock.minutes/60); const m = Math.floor(simClock.minutes%60);
+      const mm = (m<10?'0':'')+m; const hh = (h%12||12); const am = h<12? 'AM' : 'PM';
+      return `May ${simClock.day}, ${simClock.year} — ${hh}:${mm} ${am}`;
+    }
 
     function rand(min,max){ return min + Math.random()*(max-min); }
 
@@ -157,7 +171,7 @@
     }
     function centerPull(x){ const cx = RIVER_WIDTH/2; return (cx - x) * 0.0025 * LATERAL_CENTERING; }
 
-    // ===== SHALLOWS (elliptical bars). Affect flow + damage if you plow through.
+    // ===== SHALLOWS (elliptical bars)
     function seedBars(){
       BARS.length = 0;
       const bands = [ -400, 600, 1700, 2600, 3600, 4700 ];
@@ -170,8 +184,7 @@
     seedBars();
 
     function shallowFactor(x,y){
-      // 1 = deep; <1 = shallow
-      let f = 1;
+      let f = 1; // 1 = deep; <1 = shallow
       for(const b of BARS){
         const dx = (x - b.x)/b.rx; const dy = (y - b.y)/b.ry; const d2 = dx*dx + dy*dy;
         if(d2 < 1){
@@ -179,8 +192,7 @@
           f *= (b.slow + (1-b.slow)*(1 - t*t)); // more slowdown near center
         }
       }
-      // banks are shallower too
-      const margin = Math.min(x, RIVER_WIDTH-x);
+      const margin = Math.min(x, RIVER_WIDTH-x); // banks are shallower too
       const bankShallow = Math.max(0, 1 - Math.pow(margin/200, 2));
       f *= (1 - 0.35*bankShallow);
       return Math.max(0.35, Math.min(1, f));
@@ -190,36 +202,18 @@
     function waterVelocity(x, y){
       let vx = 0;
       let vy = BASE_FLOW * centerSpeedFactor(x) * (1 + 0.10 * Math.sin(y*0.0012));
-      const shall = shallowFactor(x,y); // apply shallows slowdown
+      const shall = shallowFactor(x,y);
       vy *= shall; // slower over bars/banks
-
-      // sinuous lateral sweep (point bars)
-      vx += Math.sin(y*0.00075) * 16 * shall; // reduced over shallows
-
-      // center pull
+      vx += Math.sin(y*0.00075) * 16 * shall; // sinuous sweep reduced over shallows
       vx += centerPull(x) * (0.8 + 0.2*shall);
 
-      // vortices
-      for(const v of vortices){
+      for(const v of vortices){ // vortices
         const dx = x - v.x; const dy = y - v.y; const r2 = dx*dx + dy*dy + 1; const r = Math.sqrt(r2);
-        if(r < v.r*2.5){
-          const fall = Math.exp(-(r*r)/(v.r*v.r*0.9));
-          const mag = (v.gamma / (r2 + 400)) * fall;
-          vx += (-dy) * mag; vy += ( dx) * mag;
-        }
+        if(r < v.r*2.5){ const fall = Math.exp(-(r*r)/(v.r*v.r*0.9)); const mag = (v.gamma / (r2 + 400)) * fall; vx += (-dy) * mag; vy += ( dx) * mag; }
       }
 
       // slight push away from sandbar crests (flow splits)
-      for(const b of BARS){
-        const dx = x - b.x; const dy = y - b.y;
-        const r = Math.hypot(dx/b.rx, dy/b.ry);
-        if(r<1.2){
-          const push = (1.2 - r) * 14; // gentle shed
-          vx += (dx>0?1:-1) * push; // push sideways
-          vy += (dy>0?1:-1) * push * 0.15; // tiny fore/aft push
-        }
-      }
-
+      for(const b of BARS){ const dx = x - b.x; const dy = y - b.y; const r = Math.hypot(dx/b.rx, dy/b.ry); if(r<1.2){ const push = (1.2 - r) * 14; vx += (dx>0?1:-1) * push; vy += (dy>0?1:-1) * push * 0.15; } }
       return {x: vx, y: vy};
     }
 
@@ -231,65 +225,48 @@
       { name:'Vicksburg',   x:1040,  y:2500 },
       { name:'Natchez',     x: 160,  y:3600 },
       { name:'New Orleans', x:1000,  y:4800 },
-    ].map(p=>({
-      ...p,
-      dockX: p.x < RIVER_WIDTH/2 ? p.x + 70 : p.x - 70,
-      dockY: p.y + 40
-    }));
+    ].map(p=>({ ...p, dockX: p.x < RIVER_WIDTH/2 ? p.x + 70 : p.x - 70, dockY: p.y + 40 }));
 
     // ===== PLAYER BOAT
     const boat = {
-      x: RIVER_WIDTH/2,
-      y: -500,
-      vx: 0, vy: BASE_FLOW,
-      angle: Math.PI/2,
-      throttle: 0, targetThrottle: 0,
+      x: RIVER_WIDTH/2, y: -500, vx: 0, vy: BASE_FLOW,
+      angle: Math.PI/2, throttle: 0, targetThrottle: 0,
       length: 110, width: 24,
-      hull: 1.0, // 1 = pristine
-      cash: 80,
+      hull: 1.0, cash: 80,
       fuel: 100, maxFuel: 100,
       pressure: 8, // 0..100
-      dockedAt: null, // index of port when docked
+      dockedAt: null, // index of port when docked (hard lock)
     };
+
+    // Mooring state (for hard lock & undock impulse)
+    const moor = { active:false, x:0, y:0, angle:0 };
 
     // ===== AI TRAFFIC (one steamer with simple port stops)
-    const ai = {
-      name: 'Delta Queen',
-      x: RIVER_WIDTH*0.65, y: -900,
-      vx: 0, vy: BASE_FLOW, angle: Math.PI/2,
-      throttle: 0.6,
-      state: 'RUN', // RUN | APPROACH | DOCKED
-      targetPort: 1, // starting toward Memphis
-      dwell: 0,
-    };
+    const ai = { name: 'Delta Queen', x: RIVER_WIDTH*0.65, y: -900, vx: 0, vy: BASE_FLOW, angle: Math.PI/2, throttle: 0.6, state: 'RUN', targetPort: 1, dwell: 0 };
 
     // ===== JOB SYSTEM
+    const portJobs = new Map();
     const job = { state:'NONE', origin:null, dest:null, timeLimit:0, timer:0, payout:0 };
 
     function jobsForPort(pi){
       if(portJobs.has(pi)) return portJobs.get(pi);
-      const here = ports[pi];
-      const options = [];
-      // choose up to 3 downstream destinations
+      const here = ports[pi]; const options = [];
       const dests = ports.filter((p,idx)=> idx!==pi && p.y>here.y);
       const picks = dests.length? dests.slice(0,4) : ports.filter((_,idx)=>idx!==pi).slice(0,4);
       for(let i=0;i<Math.min(3, picks.length); i++){
-        const d = picks[i];
-        const distY = Math.abs(d.y - here.y);
+        const d = picks[i]; const distY = Math.abs(d.y - here.y);
         const baseTime = Math.max(70, distY / 180); // seconds heuristic
         const time = Math.round(baseTime * (1.1 + Math.random()*0.6));
         const pay = Math.round(60 + distY * (0.08 + Math.random()*0.05));
         options.push({ origin:pi, dest: ports.indexOf(d), timeLimit: time, payout: pay });
       }
-      portJobs.set(pi, options);
-      return options;
+      portJobs.set(pi, options); return options;
     }
 
     // ===== INPUT
     const keys = new Set();
     window.addEventListener('keydown', (e)=>{
-      const k = e.key.toLowerCase();
-      keys.add(k);
+      const k = e.key.toLowerCase(); keys.add(k);
       if(['w','a','s','d','arrowup','arrowdown','arrowleft','arrowright',' ','e','f','r','g','v','b','h'].includes(k)) e.preventDefault();
       if(k===' ') { boat.targetThrottle = 0; boat.throttle = 0; }
       if(k==='h') SHOW.help = !SHOW.help;
@@ -304,24 +281,43 @@
 
     function tryDockUndock(){
       const d = nearestDockTo(boat.x, boat.y);
+      if(!d){ flashStatus('No dock nearby.'); return; }
       const wv = waterVelocity(boat.x, boat.y);
       const speedTW = Math.hypot(boat.vx-wv.x, boat.vy-wv.y);
-      if(d && dist(boat.x,boat.y,d.x,d.y) < 90){
-        if(speedTW < 28){
-          if(boat.dockedAt===null){
-            boat.dockedAt = d.index;
-            boat.vx = wv.x; boat.vy = wv.y; boat.targetThrottle = boat.throttle = 0;
-            openPortUI();
-          } else {
-            // undock
-            boat.dockedAt = null; closePortUI();
-          }
-        } else {
-          flashStatus('Too fast to dock — slow below 28 STW');
-        }
-      } else {
-        flashStatus('Get closer to the dock marker');
+      const distTo = dist(boat.x,boat.y,d.x,d.y);
+
+      // Already docked? Undock with a gentle shove.
+      if(boat.dockedAt!==null){
+        undock(); return;
       }
+
+      // Assist: within generous radius, moor regardless of speed. We'll snap & lock.
+      if(distTo < 140){
+        startMoor(d.index);
+        openPortUI();
+      } else {
+        flashStatus('Closer to the white marker to dock.');
+      }
+    }
+
+    function startMoor(portIndex){
+      const p = ports[portIndex];
+      const wv = waterVelocity(p.dockX, p.dockY);
+      boat.dockedAt = portIndex; // hard lock state
+      boat.targetThrottle = 0; boat.throttle = 0;
+      // hard snap to bollards
+      boat.x = p.dockX; boat.y = p.dockY; boat.vx = wv.x; boat.vy = wv.y;
+      moor.active = true; moor.x = p.dockX; moor.y = p.dockY; moor.angle = p.x<RIVER_WIDTH/2 ? Math.PI/2 : Math.PI/2; // aligned downriver
+      flashStatus('Lines fastened.');
+    }
+
+    function undock(){
+      const p = ports[boat.dockedAt];
+      boat.dockedAt = null; moor.active = false; closePortUI();
+      // small nudge to help clear the pier
+      const away = p.x < RIVER_WIDTH/2 ? 1 : -1; // push toward center
+      boat.vx += 28 * away; boat.vy += 8; // a little downriver drift
+      flashStatus('Cast off.');
     }
 
     // ===== RIBBONS (visualized strands)
@@ -349,6 +345,38 @@
       }
     }
 
+    // ===== PARTICLES (wake & smoke)
+    const wake = []; const smoke = [];
+    function spawnWake(x,y,dir){ wake.push({x,y,life:1,dir}); }
+    function spawnSmoke(x,y){ smoke.push({x,y,life:1}); }
+
+    function updateParticles(dt){
+      // wake from both boats
+      const wb = toScreen(boat.x, boat.y + 36);
+      if(Math.random()<0.6) spawnWake(wb.x + (Math.random()-0.5)*8, wb.y + 6, boat.angle);
+      const wa = toScreen(ai.x, ai.y + 36);
+      if(Math.random()<0.5) spawnWake(wa.x + (Math.random()-0.5)*8, wa.y + 6, ai.angle);
+      // smoke from pilot house area
+      const sb = toScreen(boat.x, boat.y - 40);
+      if(Math.random()<0.35) spawnSmoke(sb.x + (Math.random()-0.5)*6, sb.y - 8);
+
+      for(const p of wake){ p.life -= dt*0.6; }
+      for(const p of smoke){ p.life -= dt*0.25; }
+      while(wake.length && wake[0].life<=0) wake.shift();
+      while(smoke.length && smoke[0].life<=0) smoke.shift();
+    }
+
+    function drawParticles(){
+      // wake
+      ctx.save();
+      for(const p of wake){ ctx.globalAlpha = Math.max(0, p.life)*0.35; ctx.beginPath(); ctx.ellipse(p.x, p.y, 10*(1-p.life), 4*(1-p.life), 0, 0, Math.PI*2); ctx.fillStyle = '#e6f7ff'; ctx.fill(); }
+      ctx.restore();
+      // smoke
+      ctx.save();
+      for(const s of smoke){ ctx.globalAlpha = Math.max(0, s.life)*0.25; ctx.beginPath(); ctx.ellipse(s.x, s.y - (1-s.life)*25, 12*(1-s.life), 8*(1-s.life), 0, 0, Math.PI*2); ctx.fillStyle = '#c6c3bd'; ctx.fill(); }
+      ctx.restore();
+    }
+
     // ===== PHYSICS HELPERS
     function dist(x1,y1,x2,y2){ return Math.hypot(x2-x1,y2-y1); }
 
@@ -361,138 +389,109 @@
       else if(back && !forward) boat.targetThrottle = Math.max(-0.5, boat.targetThrottle - 0.9*dt);
       else boat.targetThrottle *= (1 - 0.8*dt);
 
-      // while docked, lock throttle
-      if(boat.dockedAt!==null){ boat.targetThrottle = 0; }
+      // while docked, hard lock: ignore inputs & stick position
+      if(boat.dockedAt!==null){
+        const p = ports[boat.dockedAt];
+        const wv = waterVelocity(p.dockX, p.dockY);
+        boat.throttle = 0; boat.vx = wv.x; boat.vy = wv.y; boat.x = p.dockX; boat.y = p.dockY; boat.angle = moor.angle;
+      } else {
+        // smooth throttle
+        boat.throttle += (boat.targetThrottle - boat.throttle) * Math.min(1, 6*dt);
 
-      // smooth throttle
-      boat.throttle += (boat.targetThrottle - boat.throttle) * Math.min(1, 6*dt);
+        // steering
+        const left = keys.has('a') || keys.has('arrowleft');
+        const right = keys.has('d') || keys.has('arrowright');
+        const wv = waterVelocity(boat.x, boat.y);
+        const rvx = boat.vx - wv.x; const rvy = boat.vy - wv.y; const relSpeed = Math.hypot(rvx,rvy);
+        let steer = 0; if(left && !right) steer=-1; else if(right && !left) steer=1;
+        const turnRate = TURN_BASE * Math.min(1.0, relSpeed/120);
+        boat.angle += steer * turnRate * dt;
 
-      // steering
-      const left = keys.has('a') || keys.has('arrowleft');
-      const right = keys.has('d') || keys.has('arrowright');
-      const wv = waterVelocity(boat.x, boat.y);
-      const rvx = boat.vx - wv.x; const rvy = boat.vy - wv.y; const relSpeed = Math.hypot(rvx,rvy);
-      let steer = 0; if(left && !right) steer=-1; else if(right && !left) steer=1;
-      const turnRate = TURN_BASE * Math.min(1.0, relSpeed/120);
-      boat.angle += steer * turnRate * dt;
+        // engine / boiler model
+        const thrust = MAX_THRUST * boat.throttle * (0.85 + 0.15*(1 - boat.pressure/100));
+        const fuelUse = Math.max(0, Math.abs(boat.throttle)) * 0.20 * (1 + 0.3*(boat.pressure/100));
+        boat.fuel = Math.max(0, boat.fuel - fuelUse * dt);
+        const effectiveThrust = boat.fuel>0 ? thrust : 0;
 
-      // engine / boiler model
-      const thrust = MAX_THRUST * boat.throttle * (0.85 + 0.15*(1 - boat.pressure/100));
-      // fuel consumption (no fuel -> no thrust)
-      const fuelUse = Math.max(0, Math.abs(boat.throttle)) * 0.20 * (1 + 0.3*(boat.pressure/100));
-      boat.fuel = Math.max(0, boat.fuel - fuelUse * dt);
-      const effectiveThrust = boat.fuel>0 ? thrust : 0;
+        // pressure dynamics
+        const targetPress = Math.max(6, Math.abs(boat.throttle)*100*0.75);
+        boat.pressure += (targetPress - boat.pressure) * Math.min(1, 0.8*dt);
+        if(boat.pressure>98 && Math.random()<0.002){ damage(0.01); flashStatus('Boiler strain! Ease throttle.'); }
 
-      // pressure dynamics
-      const targetPress = Math.max(6, Math.abs(boat.throttle)*100*0.75);
-      boat.pressure += (targetPress - boat.pressure) * Math.min(1, 0.8*dt);
-      if(boat.pressure>98 && Math.random()<0.002){ damage(0.01); flashStatus('Boiler strain! Ease throttle.'); }
+        // apply thrust along heading
+        boat.vx += Math.cos(boat.angle) * effectiveThrust * dt;
+        boat.vy += Math.sin(boat.angle) * effectiveThrust * dt;
 
-      // apply thrust along heading
-      boat.vx += Math.cos(boat.angle) * effectiveThrust * dt;
-      boat.vy += Math.sin(boat.angle) * effectiveThrust * dt;
+        // hydrodynamic drag toward local water
+        boat.vx += (wv.x - boat.vx) * (1 - Math.exp(-HULL_DRAG*dt));
+        boat.vy += (wv.y - boat.vy) * (1 - Math.exp(-HULL_DRAG*dt));
 
-      // hydrodynamic drag pulls velocity toward local water velocity
-      boat.vx += (wv.x - boat.vx) * (1 - Math.exp(-HULL_DRAG*dt));
-      boat.vy += (wv.y - boat.vy) * (1 - Math.exp(-HULL_DRAG*dt));
+        // integrate position
+        boat.x += boat.vx * dt; boat.y += boat.vy * dt;
 
-      // integrate position
-      boat.x += boat.vx * dt; boat.y += boat.vy * dt;
+        // banks bounce
+        if(boat.x < EDGE_MARGIN){ boat.x = EDGE_MARGIN; boat.vx *= -0.2; damage(0.06*dt); }
+        if(boat.x > RIVER_WIDTH-EDGE_MARGIN){ boat.x = RIVER_WIDTH-EDGE_MARGIN; boat.vx *= -0.2; damage(0.06*dt); }
 
-      // banks collision & ground effect near banks
-      if(boat.x < EDGE_MARGIN){ boat.x = EDGE_MARGIN; boat.vx *= -0.2; damage(0.06*dt); }
-      if(boat.x > RIVER_WIDTH-EDGE_MARGIN){ boat.x = RIVER_WIDTH-EDGE_MARGIN; boat.vx *= -0.2; damage(0.06*dt); }
-
-      // shallow damage + grounding friction when speeding
-      const shall = shallowFactor(boat.x, boat.y);
-      if(shall < 0.8 && relSpeed > 60) damage(((0.8 - shall) * (relSpeed-60)) * 0.0006 * dt);
-      if(shall < 0.7){ boat.vx *= (0.995 + shall*0.003); boat.vy *= (0.995 + shall*0.003); }
-
-      // job timer
-      if(job.state==='IN_TRANSIT' && boat.dockedAt===null) job.timer += dt;
-
-      // dock stickiness
-      if(boat.dockedAt!==null){ // keep roughly with local water
-        boat.x += (wv.x - boat.vx) * 0.4 * dt; boat.y += (wv.y - boat.vy) * 0.4 * dt;
+        // shallow damage + grounding friction when speeding
+        const shall = shallowFactor(boat.x, boat.y);
+        if(shall < 0.8){ const wv2 = waterVelocity(boat.x, boat.y); const tw = Math.hypot(boat.vx-wv2.x, boat.vy-wv2.y); if(tw > 60) damage(((0.8 - shall) * (tw-60)) * 0.0006 * dt); if(shall<0.7){ boat.vx *= (0.995 + shall*0.003); boat.vy *= (0.995 + shall*0.003);} }
       }
 
       // simple collision with AI
-      const dx = ai.x - boat.x, dy = ai.y - boat.y; const d2 = dx*dx+dy*dy; const minD = 90; if(d2 < minD*minD){
-        const d = Math.max(10, Math.sqrt(d2)); const ux = dx/d, uy = dy/d; const push = (minD - d) * 12 * dt;
-        boat.vx -= ux*push; boat.vy -= uy*push; ai.vx += ux*push; ai.vy += uy*push; damage(0.02*dt);
-      }
+      const dx = ai.x - boat.x, dy = ai.y - boat.y; const d2 = dx*dx+dy*dy; const minD = 90; if(d2 < minD*minD){ const d = Math.max(10, Math.sqrt(d2)); const ux = dx/d, uy = dy/d; const push = (minD - d) * 12 * dt; boat.vx -= ux*push; boat.vy -= uy*push; ai.vx += ux*push; ai.vy += uy*push; damage(0.02*dt); }
 
       // UI
+      const wv = waterVelocity(boat.x, boat.y);
       const gs = Math.hypot(boat.vx, boat.vy);
-      const ws = Math.hypot(wv.x, wv.y);
       const tw = Math.hypot(boat.vx - wv.x, boat.vy - wv.y);
+      const ws = Math.hypot(wv.x, wv.y);
       document.getElementById('stats').textContent = `SOG ${gs.toFixed(1)}  |  STW ${tw.toFixed(1)}  |  River ${ws.toFixed(1)}`;
       document.getElementById('hullbar').style.width = `${Math.max(0, boat.hull*100)}%`;
       document.getElementById('fuelbar').style.width = `${(boat.fuel/boat.maxFuel*100).toFixed(0)}%`;
       document.getElementById('pressbar').style.width = `${Math.min(100, boat.pressure).toFixed(0)}%`;
       document.getElementById('cash').textContent = boat.cash.toFixed(0);
+      clockEl.textContent = formatClock();
     }
 
     function damage(amount){ boat.hull = Math.max(0, boat.hull - amount); }
 
     // ===== AI UPDATE
     function updateAI(dt){
-      // choose behavior relative to ports around the player for visibility
       if(ai.state==='RUN'){
         if(ai.targetPort===null || Math.random()<0.003){
-          // pick a visible downstream port target
-          const candidates = ports.filter((p,idx)=> p.y > camera.y - 400 && p.y < camera.y + 1800);
+          const candidates = ports.filter((p)=> p.y > camera.y - 400 && p.y < camera.y + 1800);
           const pick = candidates.length? candidates[Math.floor(Math.random()*candidates.length)] : ports[Math.floor(Math.random()*ports.length)];
           ai.targetPort = ports.indexOf(pick);
         }
       }
-
       const target = ports[ai.targetPort];
       const wv = waterVelocity(ai.x, ai.y);
       const rvx = ai.vx - wv.x; const rvy = ai.vy - wv.y; const relSpeed = Math.hypot(rvx,rvy);
-
       if(ai.state==='RUN' || ai.state==='APPROACH'){
         const dock = {x: target.dockX, y: target.dockY};
         const angTo = Math.atan2(dock.y - ai.y, dock.x - ai.x);
         let diff = ((angTo - ai.angle + Math.PI) % (Math.PI*2)) - Math.PI;
         ai.angle += Math.max(-TURN_BASE*dt, Math.min(TURN_BASE*dt, diff*0.7));
-        // throttle target
-        let t = 0.75 - 0.15*Math.abs(diff);
-        // slow on final approach
+        let t = 0.75 - 0.15*Math.abs(diff); // throttle target
         const dd = Math.hypot(dock.x-ai.x, dock.y-ai.y);
         if(dd < 260) { ai.state='APPROACH'; t = Math.min(t, 0.25); }
         if(dd < 90 && relSpeed < 28){ ai.state='DOCKED'; ai.dwell = 4 + Math.random()*4; ai.vx = wv.x; ai.vy = wv.y; t = 0; }
         ai.throttle += (t - ai.throttle) * 0.6*dt;
       }
-
       if(ai.state==='DOCKED'){
-        ai.dwell -= dt;
-        if(ai.dwell<=0){
-          // choose a new port and depart
-          const candidates = ports.filter(p=> p!==target && p.y > camera.y - 600 && p.y < camera.y + 2000);
-          const pick = candidates.length? candidates[Math.floor(Math.random()*candidates.length)] : ports[(ai.targetPort+1)%ports.length];
-          ai.targetPort = ports.indexOf(pick);
-          ai.state='RUN'; ai.throttle = 0.6;
-        }
+        ai.dwell -= dt; if(ai.dwell<=0){ const candidates = ports.filter(p=> p!==target && p.y > camera.y - 600 && p.y < camera.y + 2000); const pick = candidates.length? candidates[Math.floor(Math.random()*candidates.length)] : ports[(ai.targetPort+1)%ports.length]; ai.targetPort = ports.indexOf(pick); ai.state='RUN'; ai.throttle = 0.6; }
       }
-
-      const thrust = MAX_THRUST * ai.throttle * 0.85; // slightly weaker
-      ai.vx += Math.cos(ai.angle) * thrust * dt;
-      ai.vy += Math.sin(ai.angle) * thrust * dt;
-      ai.vx += (wv.x - ai.vx) * (1 - Math.exp(-HULL_DRAG*dt));
-      ai.vy += (wv.y - ai.vy) * (1 - Math.exp(-HULL_DRAG*dt));
+      const thrust = MAX_THRUST * ai.throttle * 0.85;
+      ai.vx += Math.cos(ai.angle) * thrust * dt; ai.vy += Math.sin(ai.angle) * thrust * dt;
+      ai.vx += (wv.x - ai.vx) * (1 - Math.exp(-HULL_DRAG*dt)); ai.vy += (wv.y - ai.vy) * (1 - Math.exp(-HULL_DRAG*dt));
       ai.x += ai.vx * dt; ai.y += ai.vy * dt;
-
-      // keep inside banks
       if(ai.x < EDGE_MARGIN){ ai.x = EDGE_MARGIN; ai.vx *= -0.2; }
       if(ai.x > RIVER_WIDTH-EDGE_MARGIN){ ai.x = RIVER_WIDTH-EDGE_MARGIN; ai.vx *= -0.2; }
     }
 
     // ===== CAMERA follows player downriver, keep x centered
-    function updateCamera(dt){
-      const targetY = boat.y - canvas.clientHeight*0.38;
-      camera.y += (targetY - camera.y) * Math.min(1, 2.5*dt);
-    }
+    function updateCamera(dt){ const targetY = boat.y - canvas.clientHeight*0.38; camera.y += (targetY - camera.y) * Math.min(1, 2.5*dt); }
 
     // ===== DRAW HELPERS
     function toScreen(x,y){ return { x: (x - camera.x) + canvas.clientWidth/2, y: (y - camera.y) + canvas.clientHeight/2 }; }
@@ -501,16 +500,33 @@
       // water band gradient across width
       const gx = toScreen(0,0).x; const gx2 = toScreen(RIVER_WIDTH,0).x;
       const grd = ctx.createLinearGradient(gx,0,gx2,0);
-      grd.addColorStop(0, 'rgba(20,42,55,0.1)');
-      grd.addColorStop(0.1, 'rgba(25,66,86,0.65)');
-      grd.addColorStop(0.9, 'rgba(25,66,86,0.65)');
-      grd.addColorStop(1, 'rgba(20,42,55,0.1)');
+      grd.addColorStop(0, 'rgba(56,64,68,0.08)');
+      grd.addColorStop(0.1, 'rgba(42,86,98,0.62)');
+      grd.addColorStop(0.9, 'rgba(42,86,98,0.62)');
+      grd.addColorStop(1, 'rgba(56,64,68,0.08)');
       ctx.fillStyle = grd; ctx.fillRect(gx,0, gx2-gx, canvas.clientHeight);
+      // shoreline silhouettes
+      ctx.save();
+      ctx.fillStyle = 'rgba(12,18,24,0.85)';
+      const leftX = toScreen(0,0).x; const rightX = toScreen(RIVER_WIDTH,0).x;
+      ctx.fillRect(0,0,leftX,canvas.clientHeight);
+      ctx.fillRect(rightX,0,canvas.clientWidth-rightX,canvas.clientHeight);
+      // subtle bank foam
+      ctx.globalAlpha = 0.18; ctx.fillStyle = '#d8f2ff';
+      for(let y=camera.y-1000; y<camera.y+1500; y+=220){ const s1 = toScreen(10,y).y; const s2 = toScreen(RIVER_WIDTH-10,y+12).y; ctx.fillRect(leftX, s1, 6, 2); ctx.fillRect(rightX-6, s2, 6, 2); }
+      ctx.restore();
     }
 
-    function drawBars(){ if(!SHOW.bars) return; ctx.save(); for(const b of BARS){ const s = toScreen(b.x, b.y); ctx.beginPath(); ctx.ellipse(s.x, s.y, b.rx, b.ry, 0, 0, Math.PI*2); ctx.fillStyle = 'rgba(240, 214, 170, 0.20)'; ctx.fill(); ctx.strokeStyle = 'rgba(240,214,170,0.28)'; ctx.lineWidth = 1; ctx.stroke(); } ctx.restore(); }
+    function drawBars(){ if(!SHOW.bars) return; ctx.save();
+      for(const b of BARS){ const s = toScreen(b.x, b.y); ctx.beginPath(); ctx.ellipse(s.x, s.y, b.rx, b.ry, 0, 0, Math.PI*2); ctx.fillStyle = 'rgba(240, 214, 170, 0.18)'; ctx.fill();
+        // hatch lines for a chart vibe
+        ctx.save(); ctx.beginPath(); ctx.ellipse(s.x, s.y, b.rx, b.ry, 0, 0, Math.PI*2); ctx.clip();
+        ctx.strokeStyle = 'rgba(240,214,170,0.25)'; ctx.lineWidth = 1; for(let yy=-b.ry; yy<=b.ry; yy+=10){ ctx.beginPath(); ctx.moveTo(s.x - b.rx, s.y + yy + (yy%20?0:3)); ctx.lineTo(s.x + b.rx, s.y + yy - (yy%20?0:3)); ctx.stroke(); }
+        ctx.restore();
+        ctx.strokeStyle = 'rgba(240,214,170,0.28)'; ctx.lineWidth = 1; ctx.stroke(); }
+      ctx.restore(); }
 
-    function drawRibbons(){ if(!SHOW.ribbons) return; ctx.save(); ctx.lineWidth = 2.0; ctx.globalAlpha = 0.65; for(const rib of RIBBONS){ const pts = rib.pts; ctx.beginPath(); for(let i=0;i<pts.length;i++){ const s = toScreen(pts[i].x, pts[i].y); if(i===0) ctx.moveTo(s.x,s.y); else ctx.lineTo(s.x,s.y); } ctx.strokeStyle = 'rgba(190, 230, 255, 0.22)'; ctx.stroke(); } ctx.restore(); }
+    function drawRibbons(){ if(!SHOW.ribbons) return; ctx.save(); ctx.lineWidth = 2.0; ctx.globalAlpha = 0.62; for(const rib of RIBBONS){ const pts = rib.pts; ctx.beginPath(); for(let i=0;i<pts.length;i++){ const s = toScreen(pts[i].x, pts[i].y); if(i===0) ctx.moveTo(s.x,s.y); else ctx.lineTo(s.x,s.y); } ctx.strokeStyle = 'rgba(190, 230, 255, 0.22)'; ctx.stroke(); } ctx.restore(); }
 
     function drawFlowVectors(){ if(!SHOW.vectors) return; ctx.save(); const step = 90; for(let sx=0; sx<canvas.clientWidth; sx+=step){ for(let sy=0; sy<canvas.clientHeight; sy+=step){ const worldX = camera.x - canvas.clientWidth/2 + sx; const worldY = camera.y - canvas.clientHeight/2 + sy; if(worldX<0||worldX>RIVER_WIDTH) continue; const v = waterVelocity(worldX, worldY); const len = Math.hypot(v.x, v.y); const n = len>0 ? {x:v.x/len, y:v.y/len} : {x:0,y:1}; const L = Math.min(28, 10 + len*0.05); ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(sx + n.x*L, sy + n.y*L); ctx.moveTo(sx + n.x*L, sy + n.y*L); ctx.lineTo(sx + n.x*L - n.y*6, sy + n.y*L + n.x*6); ctx.moveTo(sx + n.x*L, sy + n.y*L); ctx.lineTo(sx + n.x*L + n.y*6, sy + n.y*L - n.x*6); ctx.strokeStyle = 'rgba(255,255,255,0.18)'; ctx.lineWidth = 1; ctx.stroke(); } } ctx.restore(); }
 
@@ -520,14 +536,15 @@
       const edgeX = p.x < RIVER_WIDTH/2 ? toScreen(0,p.y).x : toScreen(RIVER_WIDTH,p.y).x;
       const s = toScreen(p.dockX, p.dockY);
       // pier
-      ctx.save();
-      ctx.strokeStyle = 'rgba(245,245,245,0.35)';
-      ctx.lineWidth = 8; ctx.beginPath(); ctx.moveTo(edgeX, s.y); ctx.lineTo(s.x, s.y); ctx.stroke();
-      // dock marker
-      ctx.beginPath(); ctx.arc(s.x, s.y, 8, 0, Math.PI*2); ctx.fillStyle = '#ffffff'; ctx.fill();
+      ctx.save(); ctx.strokeStyle = 'rgba(245,245,245,0.35)'; ctx.lineWidth = 8; ctx.beginPath(); ctx.moveTo(edgeX, s.y); ctx.lineTo(s.x, s.y); ctx.stroke();
+      // dock marker (glow when in range)
+      const near = dist(boat.x, boat.y, p.dockX, p.dockY) < 160;
+      ctx.beginPath(); ctx.arc(s.x, s.y, 8, 0, Math.PI*2); ctx.fillStyle = near? '#b3f0ff' : '#ffffff'; ctx.fill();
+      if(near){ ctx.globalAlpha = 0.18; ctx.beginPath(); ctx.arc(s.x, s.y, 18, 0, Math.PI*2); ctx.fillStyle = '#b3f0ff'; ctx.fill(); ctx.globalAlpha = 1; }
       // label
-      ctx.font = '12px system-ui, sans-serif'; ctx.fillStyle = '#e7f0f7';
-      ctx.fillText(p.name, s.x + (p.x<RIVER_WIDTH/2?10:-60), s.y - 10);
+      ctx.font = '12px system-ui, sans-serif'; ctx.fillStyle = '#e7f0f7'; ctx.fillText(p.name, s.x + (p.x<RIVER_WIDTH/2?10:-60), s.y - 10);
+      // in-range prompt sash
+      if(near){ const msg = 'Press E to Dock'; ctx.font = '11px system-ui, sans-serif'; const w = ctx.measureText(msg).width + 12; ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillRect(s.x - w/2, s.y + 16, w, 16); ctx.fillStyle = '#dff8ff'; ctx.fillText(msg, s.x - w/2 + 6, s.y + 28); }
       ctx.restore();
     }
 
@@ -537,6 +554,7 @@
       const s = toScreen(b.x, b.y);
       ctx.save(); ctx.translate(s.x, s.y); ctx.rotate(b.angle + Math.PI/2);
       const L = b.length||110, W = b.width||24;
+      // hull
       ctx.beginPath(); ctx.moveTo(0, -L*0.5); ctx.quadraticCurveTo(W*0.5, -L*0.35, W*0.5, 0); ctx.lineTo(W*0.5, L*0.35); ctx.quadraticCurveTo(0, L*0.52, -W*0.5, L*0.35); ctx.lineTo(-W*0.5, 0); ctx.quadraticCurveTo(-W*0.5, -L*0.35, 0, -L*0.5); ctx.closePath();
       ctx.fillStyle = isPlayer? '#c7cbd1' : '#d9d1c7'; ctx.globalAlpha = 0.95; ctx.fill(); ctx.globalAlpha = 1; ctx.strokeStyle = 'rgba(0,0,0,0.35)'; ctx.lineWidth = 2; ctx.stroke();
       // pilot house
@@ -544,8 +562,7 @@
       // paddle wheel hint
       ctx.beginPath(); ctx.arc(0, L*0.36, W*0.6, Math.PI*0.12, Math.PI*0.88); ctx.strokeStyle = 'rgba(0,0,0,0.45)'; ctx.stroke();
       ctx.restore();
-
-      // labels
+      // AI name label
       if(!isPlayer){ ctx.save(); ctx.font='11px system-ui,sans-serif'; ctx.fillStyle='rgba(255,255,255,0.75)'; ctx.fillText(ai.name, s.x-24, s.y-60); ctx.restore(); }
     }
 
@@ -556,55 +573,40 @@
       const o = ports[job.origin]; const d = ports[job.dest];
       if(job.state==='PICKUP'){
         el.textContent = `Contract: ${o.name} → ${d.name}  ·  Payout $${job.payout}  ·  Time ${job.timeLimit}s`;
-        hint.innerHTML = `Dock at <b>${o.name}</b> (white marker) and press <b>E</b> to load.`;
-        hint.style.display='block';
+        hint.innerHTML = `Dock at <b>${o.name}</b> and press <b>E</b> to load.`; hint.style.display='block';
       } else if(job.state==='IN_TRANSIT'){
         const left = Math.max(0, job.timeLimit - job.timer);
         el.textContent = `Deliver: ${o.name} → ${d.name}  ·  Time left ${left.toFixed(1)}s`;
-        hint.innerHTML = `Dock at <b>${d.name}</b> and press <b>E</b> to unload.`;
-        hint.style.display='block';
+        hint.innerHTML = `Dock at <b>${d.name}</b> and press <b>E</b> to unload.`; hint.style.display='block';
       } else if(job.state==='DELIVERED'){
         el.textContent = `Delivered to ${d.name}! Earned $${job.payout}.`;
-        hint.innerHTML = `Pick up another contract at any dock.`;
-        hint.style.display='block';
+        hint.innerHTML = `Pick up another contract at any dock.`; hint.style.display='block';
       } else if(job.state==='LATE'){
         el.textContent = `Delivered late to ${d.name}. Earned $${Math.floor(job.payout*0.45)}.`;
-        hint.innerHTML = `Pick up another contract at any dock.`;
-        hint.style.display='block';
+        hint.innerHTML = `Pick up another contract at any dock.`; hint.style.display='block';
       }
     }
 
     function drawMinimap(){
-      const w = 180, h = 120; const x = 12, y = canvas.clientHeight - h - 12;
-      ctx.save(); ctx.globalAlpha = 0.95; ctx.fillStyle='rgba(0,0,0,0.35)'; ctx.fillRect(x-2,y-2,w+4,h+4); ctx.fillStyle='rgba(10,20,26,0.7)'; ctx.fillRect(x,y,w,h);
-      // map space corresponds to river width by 2200px vertical slice around camera
+      const w = 180, h = 120; const x = 12, y = canvas.clientHeight - h - 12; ctx.save();
+      ctx.globalAlpha = 0.95; ctx.fillStyle='rgba(0,0,0,0.35)'; ctx.fillRect(x-2,y-2,w+4,h+4); ctx.fillStyle='rgba(10,20,26,0.7)'; ctx.fillRect(x,y,w,h);
       const spanY = 2200; const top = camera.y - spanY*0.2; const bot = camera.y + spanY*0.8;
-      // ports
-      for(const p of ports){
-        const px = x + (p.dockX / RIVER_WIDTH) * w;
-        const py = y + ((p.dockY - top) / (bot - top)) * h;
-        if(py>y && py<y+h){ ctx.fillStyle='#c9e3f8'; ctx.fillRect(px-2,py-2,4,4); }
-      }
-      // boats
+      for(const p of ports){ const px = x + (p.dockX / RIVER_WIDTH) * w; const py = y + ((p.dockY - top) / (bot - top)) * h; if(py>y && py<y+h){ ctx.fillStyle='#c9e3f8'; ctx.fillRect(px-2,py-2,4,4); } }
       const pbx = x + (boat.x / RIVER_WIDTH) * w; const pby = y + ((boat.y - top)/(bot-top))*h; ctx.fillStyle='#a7f3d0'; ctx.fillRect(pbx-2,pby-2,4,4);
       const abx = x + (ai.x / RIVER_WIDTH) * w; const aby = y + ((ai.y - top)/(bot-top))*h; ctx.fillStyle='#f7d8a7'; ctx.fillRect(abx-2,aby-2,4,4);
       ctx.restore();
     }
 
-    function nearestDockTo(x,y){
-      let best=null, bd=1e9;
-      for(let i=0;i<ports.length;i++){
-        const p=ports[i]; const d=dist(x,y,p.dockX,p.dockY); if(d<bd){ bd=d; best={x:p.dockX,y:p.dockY,index:i}; }
-      }
-      return best;
-    }
+    function nearestDockTo(x,y){ let best=null, bd=1e9; for(let i=0;i<ports.length;i++){ const p=ports[i]; const d=dist(x,y,p.dockX,p.dockY); if(d<bd){ bd=d; best={x:p.dockX,y:p.dockY,index:i}; } } return best; }
 
     // ===== CAMERA & RENDER LOOP
     let last = performance.now();
     function frame(now){
       const dt = Math.min(0.05, (now - last)/1000); last = now;
+      advanceClock(dt);
       updateVortices(dt);
       updateRibbons(dt);
+      updateParticles(dt);
       updateBoat(dt);
       updateAI(dt);
       updateCamera(dt);
@@ -616,34 +618,48 @@
       if(SHOW.grid) drawGrid();
       if(SHOW.ribbons) drawRibbons();
       if(SHOW.vectors) drawFlowVectors();
-      if(SHOW.vorts) { // outline vortices
-        ctx.save(); ctx.lineWidth=1.5; for(const v of vortices){ const s=toScreen(v.x,v.y); ctx.beginPath(); ctx.arc(s.x,s.y,v.r,0,Math.PI*2); ctx.strokeStyle='rgba(255,255,255,0.08)'; ctx.stroke(); } ctx.restore();
-      }
+      if(SHOW.vorts) { ctx.save(); ctx.lineWidth=1.5; for(const v of vortices){ const s=toScreen(v.x,v.y); ctx.beginPath(); ctx.arc(s.x,s.y,v.r,0,Math.PI*2); ctx.strokeStyle='rgba(255,255,255,0.08)'; ctx.stroke(); } ctx.restore(); }
       drawPorts();
       drawBoat(ai, false);
       drawBoat(boat, true);
-
+      drawParticles();
       drawJobHUD();
       drawMinimap();
 
+      // time-of-day tint
+      drawTimeTint();
+
       // help overlay
       if(SHOW.help){
-        ctx.save(); ctx.globalAlpha = 0.85; ctx.fillStyle = 'rgba(0,0,0,0.45)'; ctx.fillRect(canvas.clientWidth-360, canvas.clientHeight-172, 350, 160); ctx.globalAlpha = 1; ctx.fillStyle = '#dbe8f1'; ctx.font = '12px system-ui, sans-serif';
+        ctx.save(); ctx.globalAlpha = 0.85; ctx.fillStyle = 'rgba(0,0,0,0.45)'; ctx.fillRect(canvas.clientWidth-380, canvas.clientHeight-192, 370, 180); ctx.globalAlpha = 1; ctx.fillStyle = '#dbe8f1'; ctx.font = '12px system-ui, sans-serif';
         const lines = [
-          'W/S: throttle  |  A/D: steer  |  Space: stop  |  E: dock/undock',
+          'W/S: throttle  |  A/D: steer  |  Space: stop  |  E: dock/undock (auto-moor)',
           'F: flow  R: ribbons  G: grid  V: vortices  B: sandbars  H: toggle help',
-          'Dock at white markers (slow under 28 STW) to open port.',
-          'Tip: read the strands — ride slicks between them and mind the bars.',
-          'New: fuel & pressure, repairs, job board, AI steamer docks too.'
+          'Dock when the white marker glows and the prompt shows. E will lock you on.',
+          'Tip: read the strands — ride slicks; avoid hatched shoals; fuel burns with throttle.',
+          'New: wakes/smoke, day/night clock, sepia chart aesthetic, hard dock lock.'
         ];
-        for(let i=0;i<lines.length;i++) ctx.fillText(lines[i], canvas.clientWidth-346, canvas.clientHeight-152 + i*20);
+        for(let i=0;i<lines.length;i++) ctx.fillText(lines[i], canvas.clientWidth-366, canvas.clientHeight-172 + i*20);
         ctx.restore();
       }
 
       requestAnimationFrame(frame);
     }
-
     requestAnimationFrame(frame);
+
+    function drawTimeTint(){
+      const minutes = simClock.minutes; // 0..1440
+      const dayFrac = (minutes % 1440) / 1440; // 0..1
+      // Night 0-0.2, Dawn 0.2-0.27, Day 0.27-0.75, Dusk 0.75-0.82, Night 0.82-1
+      let alpha = 0; let warm = 0;
+      if(dayFrac<0.2 || dayFrac>0.82){ alpha = 0.35; } // night dim
+      else if(dayFrac<0.27){ alpha = 0.18; warm = 0.25; } // dawn
+      else if(dayFrac>0.75){ alpha = 0.18; warm = 0.2; } // dusk
+      ctx.save();
+      if(warm>0){ const grd = ctx.createLinearGradient(0,0,0,canvas.clientHeight); grd.addColorStop(0, `rgba(255,196,128,${0.18*warm})`); grd.addColorStop(1, 'rgba(0,0,0,0)'); ctx.fillStyle = grd; ctx.fillRect(0,0,canvas.clientWidth,canvas.clientHeight); }
+      if(alpha>0){ ctx.fillStyle = `rgba(0,0,0,${alpha})`; ctx.fillRect(0,0,canvas.clientWidth,canvas.clientHeight); }
+      ctx.restore();
+    }
 
     // ===== Port UI / Economy =====
     const portUI = document.getElementById('portui');
@@ -669,29 +685,23 @@
       const refuelCost = Math.round((boat.maxFuel-boat.fuel) * FUEL_PRICE);
       repairCostEl.textContent = repairCost; refuelCostEl.textContent = refuelCost;
 
-      // cargo buttons state
       const cargoSec = document.getElementById('cargo_section');
       cargoSec.style.display = 'block';
       loadBtn.style.display = (job.state==='PICKUP' && job.origin===boat.dockedAt) ? 'inline-block' : 'none';
       unloadBtn.style.display = (job.state==='IN_TRANSIT' && job.dest===boat.dockedAt) ? 'inline-block' : 'none';
 
-      // jobs board (only if not currently carrying a job)
       jobsList.innerHTML = '';
       if(job.state==='NONE' || job.state==='DELIVERED' || job.state==='LATE'){
         const offers = jobsForPort(boat.dockedAt);
         offers.forEach((o)=>{
           const d = ports[o.dest];
-          const row = document.createElement('div');
-          row.style.marginBottom = '8px';
+          const row = document.createElement('div'); row.style.marginBottom = '8px';
           row.innerHTML = `${p.name} → <b>${d.name}</b> · Pay $${o.payout} · Time ${o.timeLimit}s `;
           const btn = document.createElement('button'); btn.className='btn'; btn.textContent='Accept';
           btn.onclick = ()=>{ job.origin=o.origin; job.dest=o.dest; job.timeLimit=o.timeLimit; job.timer=0; job.payout=o.payout; job.state='PICKUP'; updateJobUI(); flashStatus('Contract accepted. Load cargo to depart.'); closePortUI(); };
           row.appendChild(btn); jobsList.appendChild(row);
         });
-      } else {
-        const row = document.createElement('div');
-        row.style.opacity = 0.8; row.textContent = 'Active contract in progress.'; jobsList.appendChild(row);
-      }
+      } else { const row = document.createElement('div'); row.style.opacity = 0.8; row.textContent = 'Active contract in progress.'; jobsList.appendChild(row); }
 
       portUI.style.display='block';
     }
@@ -703,33 +713,19 @@
 
     loadBtn.onclick = ()=>{ if(job.state==='PICKUP' && job.origin===boat.dockedAt){ job.state='IN_TRANSIT'; job.timer=0; flashStatus('Cargo loaded. Make way!'); closePortUI(); } };
     unloadBtn.onclick = ()=>{ if(job.state==='IN_TRANSIT' && job.dest===boat.dockedAt){ const onTime = job.timer <= job.timeLimit; const pay = onTime? job.payout : Math.floor(job.payout*0.45); boat.cash += pay; job.state = onTime? 'DELIVERED' : 'LATE'; flashStatus(onTime? `Delivered on time. +$${pay}` : `Delivered late. +$${pay}`); updateJobUI(); openPortUI(); } };
-    departBtn.onclick = ()=>{ boat.dockedAt=null; closePortUI(); };
+    departBtn.onclick = ()=>{ if(boat.dockedAt!==null) undock(); };
 
     // Status toast helper
     const statusEl = document.getElementById('status');
     function flashStatus(msg){ statusEl.textContent = msg; statusEl.style.display='block'; statusEl.setAttribute('data-t','2.4'); }
 
-    // glue
     function updateJobUI(){ drawJobHUD(); }
   })();
   </script>
 
-  <!-- separate tiny loop to fade the status toast -->
+  <!-- fade the status toast -->
   <script>
-  (function(){
-    const statusEl = document.getElementById('status');
-    let last = performance.now();
-    function loop(now){
-      const dt = Math.min(0.05,(now-last)/1000); last = now;
-      if(statusEl && statusEl.style.display==='block'){
-        const current = parseFloat(statusEl.getAttribute('data-t')||'0');
-        const next = current - dt; statusEl.setAttribute('data-t', String(next));
-        if(next<=0){ statusEl.style.display='none'; statusEl.removeAttribute('data-t'); }
-      }
-      requestAnimationFrame(loop);
-    }
-    requestAnimationFrame(loop);
-  })();
+  (function(){ const statusEl = document.getElementById('status'); let last = performance.now(); function loop(now){ const dt = Math.min(0.05,(now-last)/1000); last = now; if(statusEl && statusEl.style.display==='block'){ const current = parseFloat(statusEl.getAttribute('data-t')||'0'); const next = current - dt; statusEl.setAttribute('data-t', String(next)); if(next<=0){ statusEl.style.display='none'; statusEl.removeAttribute('data-t'); } } requestAnimationFrame(loop);} requestAnimationFrame(loop); })();
   </script>
 </body>
 </html>
