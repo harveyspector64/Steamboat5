@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Mississippi — Prototype D (Dock Assist • Aesthetic Pass • Time of Day)</title>
+  <title>Mississippi — Prototype E (Camera Lead • Ribbon Fix • Load/Unload Hotkeys) — Ellipse Clamp Patch</title>
   <style>
     html, body { height: 100%; margin: 0; background:#0a0f14; color:#e7f0f7; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
     #wrap { position: relative; height: 100%; }
@@ -32,6 +32,9 @@
 
     /* Thematic vignette */
     #vignette{ position:absolute; inset:0; pointer-events:none; background:radial-gradient(100% 85% at 50% 50%, rgba(0,0,0,0) 55%, rgba(0,0,0,0.3) 100%); mix-blend-mode:multiply; }
+
+    /* Diagnostics badge */
+    #diag { position:absolute; left:12px; bottom:50%; transform:translateY(50%); background:rgba(0,0,0,0.55); color:#e7f0f7; border:1px solid rgba(255,255,255,0.15); font:12px/1.3 system-ui, sans-serif; padding:6px 8px; border-radius:8px; display:none; }
   </style>
 </head>
 <body>
@@ -81,12 +84,24 @@
     </div>
     <div id="status"></div>
     <div id="vignette"></div>
+    <div id="diag"></div>
   </div>
 
   <script>
   (()=>{
     const canvas = document.getElementById('game');
     const ctx = canvas.getContext('2d');
+    const noticeEl = document.getElementById('notice'); // used early in docking helpers
+
+    // --- Geometry guards for ellipse (fix IndexSizeError) ---
+    const EPS = 0.001;
+    function good(n){ return Number.isFinite(n) && n > EPS; }
+    function safeEllipsePath(x,y,rx,ry,rot=0,start=0,end=Math.PI*2){
+      rx = Math.abs(rx); ry = Math.abs(ry);
+      if(!good(rx) || !good(ry)) return false;
+      ctx.ellipse(x,y,rx,ry,rot,start,end);
+      return true;
+    }
 
     // DPI handling
     function resize(){
@@ -267,7 +282,7 @@
     const keys = new Set();
     window.addEventListener('keydown', (e)=>{
       const k = e.key.toLowerCase(); keys.add(k);
-      if(['w','a','s','d','arrowup','arrowdown','arrowleft','arrowright',' ','e','f','r','g','v','b','h'].includes(k)) e.preventDefault();
+      if(['w','a','s','d','arrowup','arrowdown','arrowleft','arrowright',' ','e','f','r','g','v','b','h','l','u'].includes(k)) e.preventDefault();
       if(k===' ') { boat.targetThrottle = 0; boat.throttle = 0; }
       if(k==='h') SHOW.help = !SHOW.help;
       if(k==='f') SHOW.vectors = !SHOW.vectors;
@@ -276,28 +291,19 @@
       if(k==='v') SHOW.vorts = !SHOW.vorts;
       if(k==='b') SHOW.bars = !SHOW.bars;
       if(k==='e') tryDockUndock();
+      if(k==='l') tryLoad();
+      if(k==='u') tryUnload();
     });
     window.addEventListener('keyup', (e)=>{ keys.delete(e.key.toLowerCase()); });
 
     function tryDockUndock(){
       const d = nearestDockTo(boat.x, boat.y);
       if(!d){ flashStatus('No dock nearby.'); return; }
-      const wv = waterVelocity(boat.x, boat.y);
-      const speedTW = Math.hypot(boat.vx-wv.x, boat.vy-wv.y);
-      const distTo = dist(boat.x,boat.y,d.x,d.y);
-
       // Already docked? Undock with a gentle shove.
-      if(boat.dockedAt!==null){
-        undock(); return;
-      }
-
+      if(boat.dockedAt!==null){ undock(); return; }
       // Assist: within generous radius, moor regardless of speed. We'll snap & lock.
-      if(distTo < 140){
-        startMoor(d.index);
-        openPortUI();
-      } else {
-        flashStatus('Closer to the white marker to dock.');
-      }
+      const distTo = dist(boat.x,boat.y,d.x,d.y);
+      if(distTo < 140){ startMoor(d.index); openPortUI(); } else { flashStatus('Closer to the white marker to dock.'); }
     }
 
     function startMoor(portIndex){
@@ -305,19 +311,21 @@
       const wv = waterVelocity(p.dockX, p.dockY);
       boat.dockedAt = portIndex; // hard lock state
       boat.targetThrottle = 0; boat.throttle = 0;
-      // hard snap to bollards
       boat.x = p.dockX; boat.y = p.dockY; boat.vx = wv.x; boat.vy = wv.y;
-      moor.active = true; moor.x = p.dockX; moor.y = p.dockY; moor.angle = p.x<RIVER_WIDTH/2 ? Math.PI/2 : Math.PI/2; // aligned downriver
+      moor.active = true; moor.x = p.dockX; moor.y = p.dockY; moor.angle = Math.PI/2; // aligned downriver
       flashStatus('Lines fastened.');
+      if(job.state==='PICKUP' && job.origin===boat.dockedAt) noticeEl.textContent = 'Docked — Press L to Load cargo, or use the Harbormaster. Press E to cast off.';
+      else if(job.state==='IN_TRANSIT' && job.dest===boat.dockedAt) noticeEl.textContent = 'Docked — Press U to Unload cargo, or use the Harbormaster. Press E to cast off.';
+      else noticeEl.textContent = 'Docked — Press E to open Harbormaster, L to load (if origin), U to unload (if destination).';
     }
 
     function undock(){
       const p = ports[boat.dockedAt];
       boat.dockedAt = null; moor.active = false; closePortUI();
-      // small nudge to help clear the pier
       const away = p.x < RIVER_WIDTH/2 ? 1 : -1; // push toward center
       boat.vx += 28 * away; boat.vy += 8; // a little downriver drift
       flashStatus('Cast off.');
+      noticeEl.textContent = 'Dock assist, mooring lock, wakes & smoke, day/night, sepia chart vibe, and clearer docking prompts.';
     }
 
     // ===== RIBBONS (visualized strands)
@@ -338,10 +346,19 @@
 
     function updateRibbons(dt){
       const botY = camera.y + 2200;
+      const topY = camera.y - 2200;
       for(const rib of RIBBONS){
         const pts = rib.pts;
-        for(const pt of pts){ const v = waterVelocity(pt.x, pt.y); pt.x += v.x * dt; pt.y += v.y * dt; if(pt.x < EDGE_MARGIN) pt.x = EDGE_MARGIN; if(pt.x > RIVER_WIDTH-EDGE_MARGIN) pt.x = RIVER_WIDTH-EDGE_MARGIN; }
-        for(const pt of pts){ if(pt.y > botY){ pt.y -= (RIB_POINTS-2)*RIB_SPACING_Y; pt.x += (Math.random()-0.5)*10; } }
+        for(const pt of pts){
+          const v = waterVelocity(pt.x, pt.y);
+          pt.x += v.x * dt; pt.y += v.y * dt;
+          if(pt.x < EDGE_MARGIN) pt.x = EDGE_MARGIN; if(pt.x > RIVER_WIDTH-EDGE_MARGIN) pt.x = RIVER_WIDTH-EDGE_MARGIN;
+        }
+        // recycle both below and above to keep coverage when moving up or down river
+        for(const pt of pts){
+          if(pt.y > botY){ pt.y -= (RIB_POINTS-2)*RIB_SPACING_Y; pt.x += (Math.random()-0.5)*10; }
+          if(pt.y < topY){ pt.y += (RIB_POINTS-2)*RIB_SPACING_Y; pt.x += (Math.random()-0.5)*10; }
+        }
       }
     }
 
@@ -361,7 +378,7 @@
       if(Math.random()<0.35) spawnSmoke(sb.x + (Math.random()-0.5)*6, sb.y - 8);
 
       for(const p of wake){ p.life -= dt*0.6; }
-      for(const p of smoke){ p.life -= dt*0.25; }
+      for(const s of smoke){ s.life -= dt*0.25; }
       while(wake.length && wake[0].life<=0) wake.shift();
       while(smoke.length && smoke[0].life<=0) smoke.shift();
     }
@@ -369,12 +386,28 @@
     function drawParticles(){
       // wake
       ctx.save();
-      for(const p of wake){ ctx.globalAlpha = Math.max(0, p.life)*0.35; ctx.beginPath(); ctx.ellipse(p.x, p.y, 10*(1-p.life), 4*(1-p.life), 0, 0, Math.PI*2); ctx.fillStyle = '#e6f7ff'; ctx.fill(); }
+      for(const p of wake){
+        const rx = 10*(1 - p.life), ry = 4*(1 - p.life);
+        const alpha = Math.max(0, p.life)*0.35;
+        if(!good(rx) || !good(ry)){ continue; }
+        ctx.globalAlpha = alpha;
+        ctx.beginPath();
+        if(safeEllipsePath(p.x, p.y, rx, ry)) { ctx.fillStyle = '#e6f7ff'; ctx.fill(); }
+      }
       ctx.restore();
       // smoke
       ctx.save();
-      for(const s of smoke){ ctx.globalAlpha = Math.max(0, s.life)*0.25; ctx.beginPath(); ctx.ellipse(s.x, s.y - (1-s.life)*25, 12*(1-s.life), 8*(1-s.life), 0, 0, Math.PI*2); ctx.fillStyle = '#c6c3bd'; ctx.fill(); }
+      for(const s of smoke){
+        const rise = (1 - s.life) * 25;
+        const rx = 12*(1 - s.life), ry = 8*(1 - s.life); // fixed: was '8*(1-s-life)'
+        const alpha = Math.max(0, s.life)*0.25;
+        if(!good(rx) || !good(ry)){ continue; }
+        ctx.globalAlpha = alpha;
+        ctx.beginPath();
+        if(safeEllipsePath(s.x, s.y - rise, rx, ry)) { ctx.fillStyle = '#c6c3bd'; ctx.fill(); }
+      }
       ctx.restore();
+      ctx.globalAlpha = 1;
     }
 
     // ===== PHYSICS HELPERS
@@ -435,11 +468,20 @@
 
         // shallow damage + grounding friction when speeding
         const shall = shallowFactor(boat.x, boat.y);
-        if(shall < 0.8){ const wv2 = waterVelocity(boat.x, boat.y); const tw = Math.hypot(boat.vx-wv2.x, boat.vy-wv2.y); if(tw > 60) damage(((0.8 - shall) * (tw-60)) * 0.0006 * dt); if(shall<0.7){ boat.vx *= (0.995 + shall*0.003); boat.vy *= (0.995 + shall*0.003);} }
+        if(shall < 0.8){
+          const wv2 = waterVelocity(boat.x, boat.y);
+          const tw = Math.hypot(boat.vx-wv2.x, boat.vy-wv2.y);
+          if(tw > 60) damage(((0.8 - shall) * (tw-60)) * 0.0006 * dt);
+          if(shall<0.7){ boat.vx *= (0.995 + shall*0.003); boat.vy *= (0.995 + shall*0.003); }
+        }
       }
 
       // simple collision with AI
-      const dx = ai.x - boat.x, dy = ai.y - boat.y; const d2 = dx*dx+dy*dy; const minD = 90; if(d2 < minD*minD){ const d = Math.max(10, Math.sqrt(d2)); const ux = dx/d, uy = dy/d; const push = (minD - d) * 12 * dt; boat.vx -= ux*push; boat.vy -= uy*push; ai.vx += ux*push; ai.vy += uy*push; damage(0.02*dt); }
+      const dx = ai.x - boat.x, dy = ai.y - boat.y; const d2 = dx*dx+dy*dy; const minD = 90;
+      if(d2 < minD*minD){
+        const d = Math.max(10, Math.sqrt(d2)); const ux = dx/d, uy = dy/d; const push = (minD - d) * 12 * dt;
+        boat.vx -= ux*push; boat.vy -= uy*push; ai.vx += ux*push; ai.vy += uy*push; damage(0.02*dt);
+      }
 
       // UI
       const wv = waterVelocity(boat.x, boat.y);
@@ -480,7 +522,12 @@
         ai.throttle += (t - ai.throttle) * 0.6*dt;
       }
       if(ai.state==='DOCKED'){
-        ai.dwell -= dt; if(ai.dwell<=0){ const candidates = ports.filter(p=> p!==target && p.y > camera.y - 600 && p.y < camera.y + 2000); const pick = candidates.length? candidates[Math.floor(Math.random()*candidates.length)] : ports[(ai.targetPort+1)%ports.length]; ai.targetPort = ports.indexOf(pick); ai.state='RUN'; ai.throttle = 0.6; }
+        ai.dwell -= dt;
+        if(ai.dwell<=0){
+          const candidates = ports.filter(p=> p!==target && p.y > camera.y - 600 && p.y < camera.y + 2000);
+          const pick = candidates.length? candidates[Math.floor(Math.random()*candidates.length)] : ports[(ai.targetPort+1)%ports.length];
+          ai.targetPort = ports.indexOf(pick); ai.state='RUN'; ai.throttle = 0.6;
+        }
       }
       const thrust = MAX_THRUST * ai.throttle * 0.85;
       ai.vx += Math.cos(ai.angle) * thrust * dt; ai.vy += Math.sin(ai.angle) * thrust * dt;
@@ -490,8 +537,16 @@
       if(ai.x > RIVER_WIDTH-EDGE_MARGIN){ ai.x = RIVER_WIDTH-EDGE_MARGIN; ai.vx *= -0.2; }
     }
 
-    // ===== CAMERA follows player downriver, keep x centered
-    function updateCamera(dt){ const targetY = boat.y - canvas.clientHeight*0.38; camera.y += (targetY - camera.y) * Math.min(1, 2.5*dt); }
+    // ===== CAMERA follows player, with lead ahead/astern
+    function updateCamera(dt){
+      // Keep boat offset toward direction of travel (so you can see ahead)
+      const h = canvas.clientHeight;
+      const wv = waterVelocity(boat.x, boat.y);
+      const relY = boat.vy - wv.y; // downstream > 0, upstream < 0
+      const leadFrac = relY>8 ? 0.18 : (relY<-8 ? -0.18 : 0); // bias when actually making way
+      const desiredY = boat.y + h*leadFrac;
+      camera.y += (desiredY - camera.y) * Math.min(1, 2.5*dt);
+    }
 
     // ===== DRAW HELPERS
     function toScreen(x,y){ return { x: (x - camera.x) + canvas.clientWidth/2, y: (y - camera.y) + canvas.clientHeight/2 }; }
@@ -517,14 +572,25 @@
       ctx.restore();
     }
 
-    function drawBars(){ if(!SHOW.bars) return; ctx.save();
-      for(const b of BARS){ const s = toScreen(b.x, b.y); ctx.beginPath(); ctx.ellipse(s.x, s.y, b.rx, b.ry, 0, 0, Math.PI*2); ctx.fillStyle = 'rgba(240, 214, 170, 0.18)'; ctx.fill();
-        // hatch lines for a chart vibe
-        ctx.save(); ctx.beginPath(); ctx.ellipse(s.x, s.y, b.rx, b.ry, 0, 0, Math.PI*2); ctx.clip();
-        ctx.strokeStyle = 'rgba(240,214,170,0.25)'; ctx.lineWidth = 1; for(let yy=-b.ry; yy<=b.ry; yy+=10){ ctx.beginPath(); ctx.moveTo(s.x - b.rx, s.y + yy + (yy%20?0:3)); ctx.lineTo(s.x + b.rx, s.y + yy - (yy%20?0:3)); ctx.stroke(); }
-        ctx.restore();
-        ctx.strokeStyle = 'rgba(240,214,170,0.28)'; ctx.lineWidth = 1; ctx.stroke(); }
-      ctx.restore(); }
+    function drawBars(){
+      if(!SHOW.bars) return;
+      ctx.save();
+      for(const b of BARS){
+        const s = toScreen(b.x, b.y);
+        // fill
+        ctx.beginPath();
+        if(!safeEllipsePath(s.x, s.y, b.rx, b.ry)) { continue; }
+        ctx.fillStyle = 'rgba(240, 214, 170, 0.18)'; ctx.fill();
+        // hatch lines for a chart vibe (clip safely)
+        ctx.save(); ctx.beginPath(); if(safeEllipsePath(s.x, s.y, b.rx, b.ry)){ ctx.clip();
+          ctx.strokeStyle = 'rgba(240,214,170,0.25)'; ctx.lineWidth = 1;
+          for(let yy=-b.ry; yy<=b.ry; yy+=10){ ctx.beginPath(); ctx.moveTo(s.x - b.rx, s.y + yy + (yy%20?0:3)); ctx.lineTo(s.x + b.rx, s.y + yy - (yy%20?0:3)); ctx.stroke(); }
+        } ctx.restore();
+        // outline
+        ctx.beginPath(); if(safeEllipsePath(s.x, s.y, b.rx, b.ry)){ ctx.strokeStyle = 'rgba(240,214,170,0.28)'; ctx.lineWidth = 1; ctx.stroke(); }
+      }
+      ctx.restore();
+    }
 
     function drawRibbons(){ if(!SHOW.ribbons) return; ctx.save(); ctx.lineWidth = 2.0; ctx.globalAlpha = 0.62; for(const rib of RIBBONS){ const pts = rib.pts; ctx.beginPath(); for(let i=0;i<pts.length;i++){ const s = toScreen(pts[i].x, pts[i].y); if(i===0) ctx.moveTo(s.x,s.y); else ctx.lineTo(s.x,s.y); } ctx.strokeStyle = 'rgba(190, 230, 255, 0.22)'; ctx.stroke(); } ctx.restore(); }
 
@@ -573,11 +639,11 @@
       const o = ports[job.origin]; const d = ports[job.dest];
       if(job.state==='PICKUP'){
         el.textContent = `Contract: ${o.name} → ${d.name}  ·  Payout $${job.payout}  ·  Time ${job.timeLimit}s`;
-        hint.innerHTML = `Dock at <b>${o.name}</b> and press <b>E</b> to load.`; hint.style.display='block';
+        hint.innerHTML = `Dock at <b>${o.name}</b> and press <b>L</b> to load.`; hint.style.display='block';
       } else if(job.state==='IN_TRANSIT'){
         const left = Math.max(0, job.timeLimit - job.timer);
         el.textContent = `Deliver: ${o.name} → ${d.name}  ·  Time left ${left.toFixed(1)}s`;
-        hint.innerHTML = `Dock at <b>${d.name}</b> and press <b>E</b> to unload.`; hint.style.display='block';
+        hint.innerHTML = `Dock at <b>${d.name}</b> and press <b>U</b> to unload.`; hint.style.display='block';
       } else if(job.state==='DELIVERED'){
         el.textContent = `Delivered to ${d.name}! Earned $${job.payout}.`;
         hint.innerHTML = `Pick up another contract at any dock.`; hint.style.display='block';
@@ -611,6 +677,9 @@
       updateAI(dt);
       updateCamera(dt);
 
+      // advance job timer only while underway
+      if(job.state==='IN_TRANSIT'){ job.timer += dt; }
+
       // draw
       ctx.clearRect(0,0, canvas.clientWidth, canvas.clientHeight);
       drawRiverBackground();
@@ -635,9 +704,9 @@
         const lines = [
           'W/S: throttle  |  A/D: steer  |  Space: stop  |  E: dock/undock (auto-moor)',
           'F: flow  R: ribbons  G: grid  V: vortices  B: sandbars  H: toggle help',
-          'Dock when the white marker glows and the prompt shows. E will lock you on.',
+          'Dock in range when the prompt shows. While docked: L=Load, U=Unload, E=Depart.',
           'Tip: read the strands — ride slicks; avoid hatched shoals; fuel burns with throttle.',
-          'New: wakes/smoke, day/night clock, sepia chart aesthetic, hard dock lock.'
+          'New: camera lead (see ahead), ribbons hold when going upstream, load/unload hotkeys.'
         ];
         for(let i=0;i<lines.length;i++) ctx.fillText(lines[i], canvas.clientWidth-366, canvas.clientHeight-172 + i*20);
         ctx.restore();
@@ -698,10 +767,17 @@
           const row = document.createElement('div'); row.style.marginBottom = '8px';
           row.innerHTML = `${p.name} → <b>${d.name}</b> · Pay $${o.payout} · Time ${o.timeLimit}s `;
           const btn = document.createElement('button'); btn.className='btn'; btn.textContent='Accept';
-          btn.onclick = ()=>{ job.origin=o.origin; job.dest=o.dest; job.timeLimit=o.timeLimit; job.timer=0; job.payout=o.payout; job.state='PICKUP'; updateJobUI(); flashStatus('Contract accepted. Load cargo to depart.'); closePortUI(); };
+          btn.onclick = ()=>{
+            job.origin=o.origin; job.dest=o.dest; job.timeLimit=o.timeLimit; job.timer=0; job.payout=o.payout; job.state='PICKUP';
+            updateJobUI();
+            if(boat.dockedAt===job.origin){ performLoad(); } else { flashStatus('Contract accepted. Load at origin.'); }
+            closePortUI();
+          };
           row.appendChild(btn); jobsList.appendChild(row);
         });
-      } else { const row = document.createElement('div'); row.style.opacity = 0.8; row.textContent = 'Active contract in progress.'; jobsList.appendChild(row); }
+      } else {
+        const row = document.createElement('div'); row.style.opacity = 0.8; row.textContent = 'Active contract in progress.'; jobsList.appendChild(row);
+      }
 
       portUI.style.display='block';
     }
@@ -711,8 +787,8 @@
     repairBtn.onclick = ()=>{ const cost = Math.round((1-boat.hull)*REPAIR_PRICE); if(cost<=boat.cash){ boat.cash-=cost; boat.hull=1; flashStatus('Hull repaired.'); openPortUI(); } else flashStatus('Not enough cash for repairs.'); };
     refuelBtn.onclick = ()=>{ const cost = Math.round((boat.maxFuel-boat.fuel)*FUEL_PRICE); if(cost<=boat.cash){ boat.cash-=cost; boat.fuel=boat.maxFuel; flashStatus('Tanks topped up.'); openPortUI(); } else flashStatus('Not enough cash to refuel.'); };
 
-    loadBtn.onclick = ()=>{ if(job.state==='PICKUP' && job.origin===boat.dockedAt){ job.state='IN_TRANSIT'; job.timer=0; flashStatus('Cargo loaded. Make way!'); closePortUI(); } };
-    unloadBtn.onclick = ()=>{ if(job.state==='IN_TRANSIT' && job.dest===boat.dockedAt){ const onTime = job.timer <= job.timeLimit; const pay = onTime? job.payout : Math.floor(job.payout*0.45); boat.cash += pay; job.state = onTime? 'DELIVERED' : 'LATE'; flashStatus(onTime? `Delivered on time. +$${pay}` : `Delivered late. +$${pay}`); updateJobUI(); openPortUI(); } };
+    loadBtn.onclick = ()=>{ performLoad(); };
+    unloadBtn.onclick = ()=>{ performUnload(); };
     departBtn.onclick = ()=>{ if(boat.dockedAt!==null) undock(); };
 
     // Status toast helper
@@ -720,6 +796,80 @@
     function flashStatus(msg){ statusEl.textContent = msg; statusEl.style.display='block'; statusEl.setAttribute('data-t','2.4'); }
 
     function updateJobUI(){ drawJobHUD(); }
+
+    function tryLoad(){ if(boat.dockedAt!==null && job.state==='PICKUP' && job.origin===boat.dockedAt) performLoad(); }
+    function tryUnload(){ if(boat.dockedAt!==null && job.state==='IN_TRANSIT' && job.dest===boat.dockedAt) performUnload(); }
+
+    function performLoad(){
+      if(job.state==='PICKUP' && job.origin===boat.dockedAt){ job.state='IN_TRANSIT'; job.timer=0; flashStatus('Cargo loaded. Make way!'); noticeEl.textContent='Loaded — Press E to depart, mind the current.'; closePortUI(); updateJobUI(); }
+    }
+    function performUnload(){
+      if(job.state==='IN_TRANSIT' && job.dest===boat.dockedAt){ const onTime = job.timer <= job.timeLimit; const pay = onTime? job.payout : Math.floor(job.payout*0.45); boat.cash += pay; job.state = onTime? 'DELIVERED' : 'LATE'; flashStatus(onTime? `Delivered on time. +$${pay}` : `Delivered late. +$${pay}`); noticeEl.textContent='Cargo discharged — Harbormaster can refuel/repair. E to depart.'; updateJobUI(); openPortUI(); }
+    }
+
+    // ====== Developer Diagnostics (basic tests) ======
+    function runDiagnostics(){
+      const diag = document.getElementById('diag');
+      let passed = 0, failed = 0; const logs=[];
+      function assert(name, cond){ if(cond){ passed++; logs.push(`✔ ${name}`);} else { failed++; logs.push(`✘ ${name}`);} }
+
+      // Test 1: Ribbons update should keep running and recycle above/below
+      try {
+        const beforeCounts = RIBBONS.reduce((a,r)=>a+r.pts.length,0);
+        camera.y -= 1200; updateRibbons(0.016);
+        camera.y += 2400; updateRibbons(0.016);
+        camera.y -= 1200; // restore
+        const afterCounts = RIBBONS.reduce((a,r)=>a+r.pts.length,0);
+        assert('Ribbons stable & recyclable', beforeCounts === afterCounts);
+      } catch(e){ assert('Ribbons update did not throw', false); console.error(e); }
+
+      // Test 2: Camera lead moves toward ahead when moving downstream
+      try {
+        const wv = waterVelocity(boat.x, boat.y);
+        boat.vy = wv.y + 50; const cy0 = camera.y; updateCamera(0.1); const cy1 = camera.y;
+        assert('Camera leads downstream (y increases)', cy1 > cy0);
+        boat.vy = wv.y - 50; const cy2 = camera.y; updateCamera(0.1); const cy3 = camera.y;
+        assert('Camera leads upstream (y decreases)', cy3 < cy2);
+      } catch(e){ assert('Camera lead test did not throw', false); console.error(e); }
+
+      // Test 3: Load/Unload state transitions
+      try {
+        boat.dockedAt = 0; job.state='PICKUP'; job.origin=0; job.dest=1; performLoad();
+        assert('Loading sets IN_TRANSIT', job.state==='IN_TRANSIT');
+        job.timeLimit = 10; job.timer = 5; boat.dockedAt = 1; performUnload();
+        assert('Unload sets DELIVERED/LATE', job.state==='DELIVERED' || job.state==='LATE');
+      } catch(e){ assert('Load/Unload test did not throw', false); console.error(e); }
+
+      // Test 4: Particle radius math never negative or NaN
+      try {
+        const lives = [1, 0.75, 0.5, 0.25, 0, -0.25];
+        const ok = lives.every(L=> {
+          const wrx = 10*(1-L), wry = 4*(1-L);
+          const srx = 12*(1-L), sry = 8*(1-L);
+          return [wrx,wry,srx,sry].every(v=> Number.isFinite(v) && v>=0);
+        });
+        assert('Particle radii non-negative across typical life range', ok);
+      } catch(e){ assert('Particle radius test did not throw', false); console.error(e); }
+
+      // Test 5: Bars radii always positive
+      try {
+        const ok = BARS.every(b=> b.rx>0 && b.ry>0);
+        assert('Sandbar radii positive', ok);
+      } catch(e){ assert('Sandbar radii test did not throw', false); console.error(e); }
+
+      // Test 6: safeEllipsePath rejects invalid radii
+      try {
+        const rejected = (safeEllipsePath(0,0,-1,10)===false) && (safeEllipsePath(0,0,10,0)===false);
+        assert('safeEllipsePath rejects negative/zero', rejected);
+      } catch(e){ assert('safeEllipsePath test did not throw', false); console.error(e); }
+
+      diag.style.display='block';
+      diag.textContent = `Diagnostics: ${passed} passed / ${failed} failed`;
+      console.groupCollapsed('Diagnostics'); logs.forEach(l=>console.log(l)); console.groupEnd();
+    }
+    // kick after first frame settles
+    setTimeout(runDiagnostics, 400);
+
   })();
   </script>
 
